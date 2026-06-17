@@ -1,289 +1,219 @@
-# VGGT Mapping System
+# SwiftMap
 
-A comprehensive real-time drone mapping system that receives drone images via TCP, performs intelligent keyframe selection using optical flow analysis, and generates 3D reconstructions using VGGT inference.
+SwiftMap is an **AI-in-the-loop, iterative mapping** paradigm that moves toward fast, autonomous, and fully automatic drone mapping. Instead of the traditional *human-in-the-loop, one-pass*
+workflow, which needs experienced pilots and hours of offline reconstruction, SwiftMap builds on
+Vision Foundation Models (VGGT) to reconstruct dense 3D maps in minutes and to plan the next flight
+on the fly.
 
-## 🚁 System Overview
+<p align="center">
+  <img src="figures/mapping.gif" alt="SwiftMap iterative mapping demo" width="100%">
+</p>
 
-The VGGT Mapping System implements the complete pipeline specified in the TODO requirements:
 
-1. **Real-time TCP Image Reception** (Port 43322)
-2. **Optical Flow-based Keyframe Selection** (min_disparity = 40 pixels default)
-3. **VGGT 3D Reconstruction Inference**
-4. **Dual Gradio Visualization** (3D Model + Confidence Mapping)
+If you use SwiftMap in your research, please cite:
 
-## 📁 Directory Structure
-
+```bibtex
+@inproceedings{xu2026swiftmap,
+  author    = {Xu, Jingao and Chen, Xiangliang and Bala, Mihir and Eiszler, Thomas and
+               Chanana, Aditya and Harkes, Jan and Pillai, Padmanabhan and Satyanarayanan, Mahadev},
+  title     = {Towards Fast and Fully Automatic Drone Mapping},
+  booktitle = {Proceedings of the 24th Annual International Conference on Mobile Systems,
+               Applications and Services (MobiSys '26)},
+  year      = {2026},
+  location  = {Cambridge, United Kingdom},
+  publisher = {ACM}
+}
 ```
-vggt_mapping/
-├── __init__.py                     # Package initialization
-├── launch_mapping.py               # Main launch script
-├── README.md                       # This documentation
-├── core/                          # Core system components
-│   ├── __init__.py
-│   ├── tcp_server.py              # TCP server (port 43322)
-│   ├── keyframe_selector.py       # Keyframe selection engine
-│   ├── vggt_mapper.py             # VGGT inference engine
-│   └── gradio_interface.py        # Dual 3D viewer web interface
-├── utils/                         # Utility modules
-│   ├── __init__.py
-│   ├── frame_tracker.py           # Optical flow keyframe tracking
-│   └── test_client.py             # Test client for TCP server
-└── input_stream_YYYYMMDD_HHMMSS/  # Generated output directories with all results
-```
-
-## 🛠️ Installation & Setup
-
-### Prerequisites
-- Python environment with VGGT dependencies
-- OpenCV for optical flow processing
-- Gradio for web interface
-- PyTorch and related ML libraries
-
-### Environment Activation
-```bash
-conda activate vggt  # Activate the VGGT conda environment
-```
-
-## 🚀 Usage Modes
-
-The system supports three operation modes:
-
-### 1. GUI Mode (Default)
-Web interface with dual 3D viewers and interactive controls:
-
-```bash
-python vggt_mapping/launch_mapping.py
-# or
-python vggt_mapping/launch_mapping.py --gui --host 0.0.0.0 --gui-port 7860
-```
-
-**Features:**
-- Real-time TCP server control
-- Side-by-side 3D viewers (Reconstruction + Confidence Map)
-- Interactive parameter adjustment
-- Live statistics and monitoring
-- Export capabilities
-
-### 2. TCP Server Mode
-Headless keyframe collection server:
-
-```bash
-python vggt_mapping/launch_mapping.py --server --tcp-port 43322
-```
-
-**Features:**
-- Headless operation for deployment
-- Real-time keyframe statistics
-- Compatible with existing test clients
-- Automatic keyframe storage
-
-### 3. Console Mode
-Batch processing of existing keyframes:
-
-```bash
-python vggt_mapping/launch_mapping.py --console --keyframes-dir test_input
-```
-
-**Features:**
-- Batch VGGT processing
-- 3D reconstruction generation
-- Confidence mapping
-- Camera pose export
-
-## 📡 TCP Protocol Compatibility
-
-The system uses the same TCP protocol as `vggt_localization` for compatibility:
-
-**Image Transmission:**
-1. Send image size (4 bytes, big-endian unsigned int)
-2. Send JPEG-encoded image data
-
-**Response Format:**
-- `(1.0, keyframe_count, total_frames)` - Keyframe selected
-- `(0.0, keyframe_count, total_frames)` - Frame skipped
-- `(-1.0, -1.0, -1.0)` - Error
-
-## 🧪 Testing
-
-### Test Individual Components
-
-**Test Frame Tracker:**
-```python
-python -c "
-import sys; sys.path.append('vggt_mapping/utils')
-from frame_tracker import FrameTracker
-import cv2, glob
-
-tracker = FrameTracker()
-for img_path in sorted(glob.glob('test_input/*.jpg'))[:5]:
-    image = cv2.imread(img_path)
-    is_keyframe = tracker.compute_disparity(image, 40.0, False)
-    print(f'{img_path}: {\"KEYFRAME\" if is_keyframe else \"SKIP\"}')
-"
-```
-
-**Test TCP Server:**
-```python
-python -c "
-import sys; sys.path.append('vggt_mapping/core')
-from tcp_server import MappingTCPServer
-server = MappingTCPServer(port=43399)
-print('Server created successfully' if server.initialize() else 'Failed')
-"
-```
-
-### Test with Existing Clients
-
-**Using vggt_localization test client:**
-```bash
-# Start mapping server
-python vggt_mapping/launch_mapping.py --server --tcp-port 43322
-
-# Send images (in another terminal)
-python vggt_localization/utils/test_client.py --host localhost --port 43322 --dir test_input
-```
-
-**Using mapping-specific test client:**
-```bash
-# Start server
-python vggt_mapping/launch_mapping.py --server
-
-# Send test images
-python vggt_mapping/utils/test_client.py --image-dir test_input --host localhost --port 43322
-```
-
-## ⚙️ Configuration Parameters
-
-### Keyframe Selection
-- `--min-disparity`: Motion threshold in pixels (default: 40)
-- `--visualize-flow`: Enable optical flow visualization
-
-### VGGT Processing
-- `--conf-threshold`: Confidence threshold % (default: 60)
-- `--mask-sky`: Enable sky filtering (default: True)
-- `--no-mask-dynamic`: Disable dynamic object filtering
-
-### Network Settings
-- `--host`: Server host address (default: 0.0.0.0)
-- `--tcp-port`: TCP server port (default: 43322)
-- `--gui-port`: Web interface port (default: 7860)
-
-## 📊 System Architecture
-
-### Core Components
-
-1. **FrameTracker** (`utils/frame_tracker.py`)
-   - Lucas-Kanade optical flow
-   - Feature point detection and tracking
-   - Motion disparity calculation
-   - Keyframe selection logic
-
-2. **MappingTCPServer** (`core/tcp_server.py`)
-   - Multi-threaded client handling
-   - Binary image protocol
-   - Real-time keyframe collection
-   - Statistics tracking
-
-3. **KeyframeSelector** (`core/keyframe_selector.py`)
-   - Integration of TCP server + frame tracker
-   - Real-time optical flow analysis
-   - Keyframe collection and management
-   - Callback system for external integration
-
-4. **VGGTMapper** (`core/vggt_mapper.py`)
-   - VGGT model loading and inference
-   - Batch keyframe processing
-   - 3D content generation (GLB, PLY)
-   - Confidence mapping support
-
-5. **MappingGradioInterface** (`core/gradio_interface.py`)
-   - Dual 3D viewers (Model + Confidence)
-   - Interactive TCP server controls
-   - Real-time statistics display
-   - Parameter adjustment interface
-
-## ✅ Tested Functionality
-
-### ✅ Successfully Tested:
-- ✅ **FrameTracker**: Optical flow keyframe selection with real images
-- ✅ **TCP Server**: Multi-client connection handling and image reception
-- ✅ **Protocol Compatibility**: Compatible with existing test clients
-- ✅ **Keyframe Selection**: Motion-based intelligent frame filtering
-- ✅ **Component Integration**: All modules work together
-
-### 🔧 Environment Requirements:
-- Some components require proper conda environment activation
-- NumPy compatibility issues may need resolution
-- Full VGGT model inference requires GPU and proper dependencies
-
-## 📈 Performance Characteristics
-
-### Keyframe Selection:
-- **Processing Time**: ~1-5ms per frame (optical flow)
-- **Feature Detection**: Up to 1000 corner features
-- **Selection Rate**: Varies based on motion (typically 20-80%)
-
-### TCP Server:
-- **Protocol**: Binary image transmission
-- **Concurrency**: Multi-threaded client support
-- **Storage**: Automatic keyframe processing and saving to organized directories
-
-### VGGT Processing:
-- **Batch Processing**: Handles collected keyframes
-- **Output Formats**: GLB, PLY, JSON (camera poses)
-- **Confidence Mapping**: NFN-style red-to-green visualization
-
-## 🎯 Matching TODO Requirements
-
-The implementation fully satisfies the TODO specifications:
-
-- ✅ **Port 43322**: TCP server on specified port
-- ✅ **Keyframe Selection**: Optical flow with min_disparity=40
-- ✅ **VGGT Integration**: Uses existing VGGT model and utilities
-- ✅ **Gradio Interface**: Dual 3D viewers without upload interface
-- ✅ **Default Parameters**: Sky filtering enabled, dynamic filtering disabled, 60% confidence
-- ✅ **Test Compatibility**: Works with vggt_localization test client
-
-## 🚀 Quick Start
-
-1. **Activate Environment:**
-   ```bash
-   conda activate vggt
-   ```
-
-2. **Start GUI Mode:**
-   ```bash
-   python vggt_mapping/launch_mapping.py
-   ```
-
-3. **Open Web Interface:** http://localhost:7860
-
-4. **Start TCP Server:** Click "Start TCP Server" in web interface
-
-5. **Send Test Images:**
-   ```bash
-   python vggt_mapping/utils/test_client.py --image-dir test_input
-   ```
-
-6. **Process Keyframes:** Click "Process Keyframes with VGGT" in web interface
-
-7. **View Results:** 3D model and confidence map appear in dual viewers
-
-## 📝 Notes
-
-- The system is designed for real drone integration via TCP
-- Optical flow ensures efficient keyframe selection
-- Compatible with existing vggt_localization workflow  
-- Dual visualization supports both 3D reconstruction and confidence analysis
-- All TODO requirements have been implemented and tested
-
-## 🔧 Troubleshooting
-
-**Import Issues:** Use direct imports if package imports fail
-**Environment Issues:** Ensure conda vggt environment is active
-**Port Conflicts:** Use different ports with --tcp-port and --gui-port
-**Memory Issues:** Process smaller batches of keyframes
 
 ---
 
-**Status: ✅ Complete - All TODO requirements implemented and tested**
+**SwiftMap** turns a stream (or folder) of
+drone images into a dense 3D reconstruction and a map-quality evaluation, in three stages:
+
+1. **Keyframe (KF) selection** — only frames with enough contribution will be leveraged for VGGT inference.
+2. **VGGT mapping** — the [VGGT](https://github.com/facebookresearch/vggt) model infers camera poses,
+   depth, and a 3D point map from the selected keyframes.
+3. **Map evaluation + Next Flight Navigation (NFN)** — a confidence-colored point cloud shows where the
+   map is reliable, and NFN suggests where to fly next to improve it.
+
+---
+
+## Repository layout
+
+```
+SwiftMap/
+├── launch_mapping.py        # Single entry point (GUI / server / console)
+├── requirements.txt
+├── swiftmap/                # The SwiftMap package
+│   ├── core/                # vggt_mapper, tcp_server, keyframe_selector, gradio_interface
+│   ├── utils/               # frame_tracker, confidence_mapping, test_client
+│   ├── nfn/                 # Next Flight Navigation (planner + viser viewer)
+│   └── visual_util.py       # GLB / PLY export helpers
+└── vggt/                    # Bundled VGGT model package
+```
+
+---
+
+## Installation
+
+```bash
+git clone <YOUR_REPO_URL> SwiftMap
+cd SwiftMap
+
+conda create -n swiftmap python=3.10 -y
+conda activate swiftmap
+pip install -r requirements.txt
+```
+
+The VGGT model weights (`facebook/VGGT-1B`) download automatically from Hugging Face on the first run.
+A CUDA GPU is strongly recommended.
+
+### Get test data
+
+Download the sample drone images here:
+
+> **Test images:** `<DOWNLOAD_LINK>`  *(provided separately)*
+
+Unzip them into a folder, e.g. `data/test_images/` (a flat folder of `.jpg` / `.png` frames). Use this
+folder wherever a directory of images is needed below.
+
+---
+
+## Running SwiftMap with GUI (recommended)
+
+Start the web interface:
+
+```bash
+conda activate swiftmap
+python launch_mapping.py
+```
+
+Open the printed URL (default **http://localhost:7866**). The page has two 3D viewers on top
+(**3D Reconstruction** and **Confidence Map**) and three control tabs below. Follow the steps in order:
+
+<p align="center">
+  <img src="figures/gui.png" alt="SwiftMap GUI overview" width="100%">
+</p>
+
+*The SwiftMap web GUI: the two 3D viewers sit on top, and the control tabs referenced in the steps
+below are along the bottom.*
+
+### Step 1 — Collect keyframes  (tab: **🌐 SwiftMap Mapping Engine Control**)
+1. Set **TCP Port** (default `43322`) and **Min Disparity Threshold** (how much motion before a new
+   keyframe is taken — larger = fewer keyframes).
+2. Click **🚀 Start SwiftMap Mapping Engine**. **Server Status** turns to running.
+3. Stream images to it (from another terminal):
+   ```bash
+   python -m swiftmap.utils.test_client --host localhost --port 43322 \
+          --image-dir data/test_images --delay 0.1
+   ```
+   Watch **Collected Keyframes** go up. (Use **🗑️ Clear Keyframes** to start over.)
+
+### Step 2 — Reconstruct  (tab: **⚙️ Processing Control**)
+1. Set **Confidence Threshold (%)** and, if you like, **Filter Sky** / **Filter Dynamic Objects**.
+2. Click **🔄 Process Keyframes with VGGT**. The **3D Reconstruction** viewer (top-left) fills in.
+
+### Step 3 — Evaluate map quality  (tab: **⚙️ Processing Control**)
+- Click **📊 Generate Confidence Map**. The **Confidence Map** viewer (top-right) shows a red→green cloud
+  (red = low quality, green = high quality).
+
+### Step 4 — Plan the next flight (NFN)  (tab: **⚙️ Processing Control**)
+- Click **🧭 Analyze with NFN**. SwiftMap finds the regions worth re-flying and opens an interactive
+  **Viser** viewer in a separate page (default **http://localhost:8080** — use the link shown next to the
+  button, or open it manually). There you see 🔴 to-improve regions, 🔵 suggested next viewpoints, and
+  🟢 your existing cameras over the point cloud. The **candidate viewpoint positions and orientations**
+  are also written to the **Processing Log** (see Step 6).
+
+### Step 5 — Export  (tab: **⚙️ Processing Control**)
+- Click **💾 Export Results** to write the camera poses to the run's output folder.
+
+### Step 6 — Monitor  (tab: **📈 Statistics & Info**)
+- **Live Statistics** shows server/keyframe status; **Processing Log** shows messages and the NFN
+  candidate viewpoint list (position + look direction for each suggested camera).
+
+---
+
+## Running SwiftMap with CLI
+
+No GUI — process images directly. Activate the env first: `conda activate swiftmap`.
+
+### Option A — Batch a folder of images (console mode)
+
+The simplest path if you already have the frames:
+
+```bash
+python launch_mapping.py --console --keyframes-dir data/test_images \
+       --conf-threshold 60 --mask-sky
+```
+
+This runs VGGT on the folder and writes a timestamped output directory (see **Output** below).
+
+### Option B — Headless streaming server + client
+
+Mimics the GUI's Step 1, without a browser:
+
+```bash
+# Terminal A — start the keyframe-collection server
+python launch_mapping.py --server --tcp-port 43322 --min-disparity 40
+
+# Terminal B — stream images to it
+python -m swiftmap.utils.test_client --host localhost --port 43322 \
+       --image-dir data/test_images --delay 0.1
+```
+
+### Useful flags
+- GUI: `--gui-port 7866`, `--host 0.0.0.0`, `--share`, `--no-browser`
+- Server: `--tcp-port 43322`, `--min-disparity 40`, `--visualize-flow`
+- Console: `--keyframes-dir DIR`, `--conf-threshold 60`, `--mask-sky`, `--no-mask-dynamic`
+
+Run `python launch_mapping.py --help` for the full list.
+
+---
+
+## Output
+
+Each run writes a timestamped directory in the working folder:
+
+```
+input_stream_YYYYMMDD_HHMMSS/
+├── images/             # the selected keyframes
+├── sky_masks/          # sky masks (if sky filtering is on)
+├── scene.glb           # 3D reconstruction
+├── confidence_map.glb  # map-quality (confidence) visualization
+├── pointcloud_*.ply    # point cloud export
+├── predictions.npz     # raw VGGT outputs
+└── camera_poses.json   # estimated camera poses
+```
+
+Open the `.glb` / `.ply` files in any 3D viewer (MeshLab, Blender, …).
+
+---
+
+## TCP protocol
+
+The streaming server speaks a simple binary protocol (used by `swiftmap/utils/test_client.py`):
+
+1. Send the image size as **4 bytes, big-endian unsigned int**.
+2. Send the **JPEG-encoded** image bytes.
+
+---
+
+## Acknowledgements
+
+- **VGGT** (Visual Geometry Grounded Transformer), Meta AI — the bundled `vggt/` package and the
+  `facebook/VGGT-1B` weights. See https://github.com/facebookresearch/vggt.
+- **VGGT-SLAM** — inspiration for the optical-flow keyframe-selection algorithm.
+
+## License
+
+SwiftMap is made of two parts with **different licenses**:
+
+| Part | Files | License |
+|------|-------|---------|
+| **SwiftMap** (our own code) | `swiftmap/` | **GNU GPL v2** — see [`LICENSE`](./LICENSE) |
+| **VGGT** (vendored from Meta) | `vggt/`  | **CC BY-NC 4.0** — see [`vggt/LICENSE`](./vggt/LICENSE) |
+
+The bundled `vggt/` package is from
+[`facebookresearch/vggt`](https://github.com/facebookresearch/vggt) at commit **`b0057ad`**
+(2025-07-14), which — together with the `facebook/VGGT-1B` weights — is licensed under **Creative
+Commons Attribution-NonCommercial 4.0 (CC BY-NC 4.0)**.

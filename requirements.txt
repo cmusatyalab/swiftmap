@@ -1,0 +1,22 @@
+# Core: VGGT model + inference
+torch==2.3.1
+torchvision==0.18.1
+numpy<2
+Pillow
+einops
+safetensors
+huggingface_hub
+opencv-python
+
+# 3D content generation & geometry
+trimesh
+scipy
+matplotlib
+requests
+
+# Web interface (GUI mode) and 3D visualization
+gradio==5.17.1
+viser==0.2.23
+
+# Optional: sky masking via skyseg.onnx (auto-downloaded on first use)
+onnxruntime

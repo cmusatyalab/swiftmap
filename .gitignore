@@ -1,8 +1,25 @@
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.egg-info/
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+.env
+
+# SwiftMap run outputs
+input_stream_*/
+output/
 *.glb
 *.ply
 *.npz
-*.json
-renders/
+
+# Auto-downloaded model assets
+skyseg.onnx
+*.pt
+
+# Misc
+.DS_Store
+.gradio/

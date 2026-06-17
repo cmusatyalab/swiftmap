@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
+# Copyright (C) 2024 Carnegie Mellon University
 """
-VGGT Mapping System Launch Script
+SwiftMap Launch Script
 
-Main entry point for the VGGT mapping system with multiple operation modes:
+Main entry point for the SwiftMap drone mapping system with multiple operation modes:
 - Gradio GUI mode (default): Web interface with dual 3D viewers
 - TCP server mode: Headless keyframe collection server
 - Console mode: Process existing keyframes without GUI
@@ -26,24 +21,21 @@ import argparse
 import time
 from datetime import datetime
 
-# Add paths for imports
-current_dir = os.path.dirname(os.path.abspath(__file__))
-vggt_root = os.path.dirname(current_dir)
-if vggt_root not in sys.path:
-    sys.path.append(vggt_root)
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
+# Add the repo root to path so the `swiftmap` and `vggt` packages resolve
+repo_root = os.path.dirname(os.path.abspath(__file__))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
 # Import components directly
-from vggt_mapping.core.gradio_interface import MappingGradioInterface
-from vggt_mapping.core.keyframe_selector import KeyframeSelector
-from vggt_mapping.core.vggt_mapper import VGGTMapper
+from swiftmap.core.gradio_interface import MappingGradioInterface
+from swiftmap.core.keyframe_selector import KeyframeSelector
+from swiftmap.core.vggt_mapper import VGGTMapper
 
 
 def print_banner():
     """Print system banner."""
     print("="*70)
-    print("🚁 VGGT MAPPING SYSTEM")
+    print("🚁 SwiftMap Mapping System")
     print("="*70)
     print("Real-time drone mapping with keyframe selection and 3D reconstruction")
     print("")
@@ -52,7 +44,7 @@ def print_banner():
     print("  • Optical flow-based keyframe selection") 
     print("  • VGGT 3D reconstruction inference")
     print("  • Dual visualization (3D model + confidence mapping)")
-    print("  • Compatible with vggt_localization test clients")
+    print("  • Compatible with the bundled test client (swiftmap/utils/test_client.py)")
     print("="*70)
     print("")
 
@@ -262,7 +254,7 @@ def console_mode(args):
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="VGGT Mapping System - Real-time drone mapping with keyframe selection",
+        description="SwiftMap - Real-time drone mapping with keyframe selection",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -328,10 +320,10 @@ Examples:
         success = gui_mode(args)
     
     if success:
-        print("🏁 VGGT Mapping System finished successfully")
+        print("🏁 SwiftMap Mapping System finished successfully")
         return 0
     else:
-        print("❌ VGGT Mapping System finished with errors")
+        print("❌ SwiftMap Mapping System finished with errors")
         return 1
 
 
