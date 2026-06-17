@@ -9,8 +9,7 @@ on the fly.
   <img src="figures/mapping.gif" alt="SwiftMap iterative mapping demo" width="100%">
 </p>
 
-*The map gets denser and more complete over multiple flight rounds. Each round shows its flight time
-and the drone's remaining battery.*
+*The map gets denser and more complete over multiple flight rounds. Each round shows the total time and the drone's remaining battery.*
 
 
 If you use SwiftMap in your research, please cite:
