@@ -101,10 +101,10 @@ Open the printed URL (default **http://localhost:7866**). The page has two 3D vi
 below are along the bottom.*
 
 ### 1. Collect keyframes  (tab: **🌐 SwiftMap Mapping Engine Control**)
-1. Set **TCP Port** (default `43322`) and **Min Disparity Threshold** (how much motion before a new
+* Set **TCP Port** (default `43322`) and **Min Disparity Threshold** (how much motion before a new
    keyframe is taken — larger = fewer keyframes).
-2. Click **🚀 Start SwiftMap Mapping Engine**. **Server Status** turns to running.
-3. Stream images to it (from another terminal):
+* Click **🚀 Start SwiftMap Mapping Engine**. **Server Status** turns to running.
+* Stream images to it (from another terminal):
    ```bash
    python -m swiftmap.utils.test_client --host localhost --port 43322 \
           --image-dir data/test_images --delay 0.1
@@ -112,8 +112,8 @@ below are along the bottom.*
    Watch **Collected Keyframes** go up. (Use **🗑️ Clear Keyframes** to start over.)
 
 ### 2. Reconstruct  (tab: **⚙️ Processing Control**)
-1. Set **Confidence Threshold (%)** and, if you like, **Filter Sky** / **Filter Dynamic Objects**.
-2. Click **🔄 Process Keyframes with VGGT**. The **3D Reconstruction** viewer (top-left) fills in.
+* Set **Confidence Threshold (%)** and, if you like, **Filter Sky** / **Filter Dynamic Objects**.
+* Click **🔄 Process Keyframes with VGGT**. The **3D Reconstruction** viewer (top-left) fills in.
 
 ### 3. Evaluate map quality  (tab: **⚙️ Processing Control**)
 - Click **📊 Generate Confidence Map**. The **Confidence Map** viewer (top-right) shows a red→green cloud
