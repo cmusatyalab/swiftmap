@@ -98,7 +98,7 @@ Open the printed URL (default **http://localhost:7866**). The page has two 3D vi
 *The SwiftMap web GUI: the two 3D viewers sit on top, and the control tabs referenced in the steps
 below are along the bottom.*
 
-### Step 1 — Collect keyframes  (tab: **🌐 SwiftMap Mapping Engine Control**)
+### 1. Collect keyframes  (tab: **🌐 SwiftMap Mapping Engine Control**)
 1. Set **TCP Port** (default `43322`) and **Min Disparity Threshold** (how much motion before a new
    keyframe is taken — larger = fewer keyframes).
 2. Click **🚀 Start SwiftMap Mapping Engine**. **Server Status** turns to running.
@@ -109,25 +109,25 @@ below are along the bottom.*
    ```
    Watch **Collected Keyframes** go up. (Use **🗑️ Clear Keyframes** to start over.)
 
-### Step 2 — Reconstruct  (tab: **⚙️ Processing Control**)
+### 2. Reconstruct  (tab: **⚙️ Processing Control**)
 1. Set **Confidence Threshold (%)** and, if you like, **Filter Sky** / **Filter Dynamic Objects**.
 2. Click **🔄 Process Keyframes with VGGT**. The **3D Reconstruction** viewer (top-left) fills in.
 
-### Step 3 — Evaluate map quality  (tab: **⚙️ Processing Control**)
+### 3. Evaluate map quality  (tab: **⚙️ Processing Control**)
 - Click **📊 Generate Confidence Map**. The **Confidence Map** viewer (top-right) shows a red→green cloud
   (red = low quality, green = high quality).
 
-### Step 4 — Plan the next flight (NFN)  (tab: **⚙️ Processing Control**)
+### 4. Plan the next flight (NFN)  (tab: **⚙️ Processing Control**)
 - Click **🧭 Analyze with NFN**. SwiftMap finds the regions worth re-flying and opens an interactive
   **Viser** viewer in a separate page (default **http://localhost:8080** — use the link shown next to the
   button, or open it manually). There you see 🔴 to-improve regions, 🔵 suggested next viewpoints, and
   🟢 your existing cameras over the point cloud. The **candidate viewpoint positions and orientations**
   are also written to the **Processing Log** (see Step 6).
 
-### Step 5 — Export  (tab: **⚙️ Processing Control**)
+### 5. Export  (tab: **⚙️ Processing Control**)
 - Click **💾 Export Results** to write the camera poses to the run's output folder.
 
-### Step 6 — Monitor  (tab: **📈 Statistics & Info**)
+### 6. Monitor  (tab: **📈 Statistics & Info**)
 - **Live Statistics** shows server/keyframe status; **Processing Log** shows messages and the NFN
   candidate viewpoint list (position + look direction for each suggested camera).
 
