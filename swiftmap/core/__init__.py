@@ -4,20 +4,23 @@
 SwiftMap Mapping Core Components
 
 Core functionality for the VGGT mapping system including:
+- Mapping session orchestrator (TCP transport + keyframe selection)
 - TCP server for drone image reception
 - Keyframe selection based on optical flow
 - VGGT inference engine for 3D mapping
-- Gradio web interface for visualization
+- Next Flight Navigation (NFN) planning
 """
 
+from swiftmap.core.session import MappingSession
 from swiftmap.core.tcp_server import MappingTCPServer
 from swiftmap.core.keyframe_selector import KeyframeSelector
 from swiftmap.core.vggt_mapper import VGGTMapper
-from swiftmap.core.gradio_interface import MappingGradioInterface
+from swiftmap.core.nfn import NextFlightPlanner
 
 __all__ = [
+    "MappingSession",
     "MappingTCPServer",
     "KeyframeSelector",
-    "VGGTMapper", 
-    "MappingGradioInterface"
+    "VGGTMapper",
+    "NextFlightPlanner",
 ]

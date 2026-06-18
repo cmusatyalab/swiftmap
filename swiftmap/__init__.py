@@ -22,17 +22,19 @@ Usage:
 __version__ = "1.0.0"
 
 # Main system components
+from swiftmap.core.session import MappingSession
 from swiftmap.core.tcp_server import MappingTCPServer
 from swiftmap.core.keyframe_selector import KeyframeSelector
 from swiftmap.core.vggt_mapper import VGGTMapper
-from swiftmap.core.gradio_interface import MappingGradioInterface
+from swiftmap.frontend.gradio_interface import MappingGradioInterface
 
-# Utilities
-from swiftmap.utils.frame_tracker import FrameTracker
+# Keyframe selection helper
+from swiftmap.core.keyframe_selector import FrameTracker
 
 __all__ = [
+    "MappingSession",
     "MappingTCPServer",
-    "KeyframeSelector", 
+    "KeyframeSelector",
     "VGGTMapper",
     "MappingGradioInterface",
     "FrameTracker"

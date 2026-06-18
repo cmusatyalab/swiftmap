@@ -27,9 +27,11 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import trimesh
 
-# Add vggt to path for imports
+# Add repo root to path so the vendored `vggt` package resolves.
+# This file lives at swiftmap/core/vggt_mapper/vggt_mapper.py, so the repo root is
+# three levels up from its directory.
 current_dir = os.path.dirname(os.path.abspath(__file__))
-vggt_root = os.path.dirname(os.path.dirname(current_dir))
+vggt_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
 if vggt_root not in sys.path:
     sys.path.append(vggt_root)
 
@@ -37,11 +39,11 @@ from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
-from swiftmap.visual_util import predictions_to_glb, export_point_cloud_to_ply
+from swiftmap.core.vggt_mapper.scene_export import predictions_to_glb, export_point_cloud_to_ply
 
 # Try to import confidence mapping utilities
 try:
-    from swiftmap.utils.confidence_mapping import (
+    from swiftmap.core.vggt_mapper.confidence_mapping import (
         generate_confidence_point_cloud,
         analyze_confidence_distribution
     )
@@ -360,7 +362,7 @@ class VGGTMapper:
             
             print(f"Copied {len(keyframe_paths)} keyframes to {target_dir_images}")
             
-            # Use predictions_to_glb from swiftmap.visual_util
+            # Use predictions_to_glb from swiftmap.core.vggt_mapper.scene_export
             scene = predictions_to_glb(
                 predictions=predictions,
                 conf_thres=params["conf_threshold"],

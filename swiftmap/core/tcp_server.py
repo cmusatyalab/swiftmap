@@ -329,7 +329,7 @@ class MappingTCPServer:
             
             print(f"SwiftMap Mapping TCP Server started on {self.host}:{self.port}")
             print("Waiting for drone clients...")
-            print("Compatible with the bundled test client (swiftmap/utils/test_client.py)")
+            print("Compatible with the bundled test client (test/test_client.py)")
             
             while self.is_running:
                 try:
@@ -459,7 +459,7 @@ if __name__ == "__main__":
     
     try:
         if server.initialize():
-            print("Test server starting. Use swiftmap/utils/test_client.py to test.")
+            print("Test server starting. Use test/test_client.py to test.")
             server.start_server()
     except KeyboardInterrupt:
         print("\nShutting down test server...")

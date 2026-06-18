@@ -44,13 +44,16 @@ drone images into a dense 3D reconstruction and a map-quality evaluation, in thr
 
 ```
 SwiftMap/
-├── launch_mapping.py        # Single entry point (GUI / server / console)
-├── requirements.txt
+├── launch_mapping.py        # Entry point — launches the Gradio web GUI
+├── pyproject.toml           # Dependencies (managed with uv)
 ├── swiftmap/                # The SwiftMap package
-│   ├── core/                # vggt_mapper, tcp_server, keyframe_selector, gradio_interface
-│   ├── utils/               # frame_tracker, confidence_mapping, test_client
-│   ├── nfn/                 # Next Flight Navigation (planner + viser viewer)
-│   └── visual_util.py       # GLB / PLY export helpers
+│   ├── core/                # Domain logic
+│   │   ├── tcp_server.py            # TCP keyframe-collection server
+│   │   ├── keyframe_selector/       # optical-flow keyframe selection (+ frame_tracker)
+│   │   ├── vggt_mapper/             # VGGT inference + scene_export (GLB/PLY) + confidence map
+│   │   └── nfn/                     # Next Flight Navigation planner
+│   └── frontend/            # Gradio web UI, gradio compat shim, Viser viewer
+├── test/                    # test_client.py (streaming client)
 └── vggt/                    # Bundled VGGT model package
 ```
 
@@ -58,17 +61,18 @@ SwiftMap/
 
 ## Installation
 
+SwiftMap uses [uv](https://docs.astral.sh/uv/) to manage its Python environment.
+
 ```bash
 git clone <YOUR_REPO_URL> SwiftMap
 cd SwiftMap
 
-conda create -n swiftmap python=3.10 -y
-conda activate swiftmap
-pip install -r requirements.txt
+uv sync          # creates .venv and installs all dependencies from the lockfile
 ```
 
-The VGGT model weights (`facebook/VGGT-1B`) download automatically from Hugging Face on the first run.
-A CUDA GPU is strongly recommended.
+Then run any command with `uv run …` (no environment to activate). The VGGT model weights
+(`facebook/VGGT-1B`) download automatically from Hugging Face on the first run. A CUDA GPU is
+strongly recommended.
 
 ### Get test data
 
@@ -81,14 +85,16 @@ folder wherever a directory of images is needed below.
 
 ---
 
-## Running SwiftMap with GUI (recommended)
+## Running SwiftMap
 
 Start the web interface:
 
 ```bash
-conda activate swiftmap
-python launch_mapping.py
+uv run python launch_mapping.py
 ```
+
+(`--host` and `--gui-port` override the bind address and port; run
+`uv run python launch_mapping.py --help` for the full list.)
 
 Open the printed URL (default **http://localhost:7866**). The page has two 3D viewers on top
 (**3D Reconstruction** and **Confidence Map**) and three control tabs below. Follow the steps in order:
@@ -106,7 +112,7 @@ below are along the bottom.*
 * Click **🚀 Start SwiftMap Mapping Engine**. **Server Status** turns to running.
 * Stream images to it (from another terminal):
    ```bash
-   python -m swiftmap.utils.test_client --host localhost --port 43322 \
+   uv run python test/test_client.py --host localhost --port 43322 \
           --image-dir data/test_images --delay 0.1
    ```
    Watch **Collected Keyframes** go up. (Use **🗑️ Clear Keyframes** to start over.)
@@ -135,43 +141,6 @@ below are along the bottom.*
 
 ---
 
-## Running SwiftMap with CLI
-
-No GUI — process images directly. Activate the env first: `conda activate swiftmap`.
-
-### Option A — Batch a folder of images (console mode)
-
-The simplest path if you already have the frames:
-
-```bash
-python launch_mapping.py --console --keyframes-dir data/test_images \
-       --conf-threshold 60 --mask-sky
-```
-
-This runs VGGT on the folder and writes a timestamped output directory (see **Output** below).
-
-### Option B — Headless streaming server + client
-
-Mimics the GUI's Step 1, without a browser:
-
-```bash
-# Terminal A — start the keyframe-collection server
-python launch_mapping.py --server --tcp-port 43322 --min-disparity 40
-
-# Terminal B — stream images to it
-python -m swiftmap.utils.test_client --host localhost --port 43322 \
-       --image-dir data/test_images --delay 0.1
-```
-
-### Useful flags
-- GUI: `--gui-port 7866`, `--host 0.0.0.0`, `--share`, `--no-browser`
-- Server: `--tcp-port 43322`, `--min-disparity 40`, `--visualize-flow`
-- Console: `--keyframes-dir DIR`, `--conf-threshold 60`, `--mask-sky`, `--no-mask-dynamic`
-
-Run `python launch_mapping.py --help` for the full list.
-
----
-
 ## Output
 
 Each run writes a timestamped directory in the working folder:
@@ -193,7 +162,7 @@ Open the `.glb` / `.ply` files in any 3D viewer (MeshLab, Blender, …).
 
 ## TCP protocol
 
-The streaming server speaks a simple binary protocol (used by `swiftmap/utils/test_client.py`):
+The streaming server speaks a simple binary protocol (used by `test/test_client.py`):
 
 1. Send the image size as **4 bytes, big-endian unsigned int**.
 2. Send the **JPEG-encoded** image bytes.

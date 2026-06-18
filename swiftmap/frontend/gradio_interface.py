@@ -18,7 +18,7 @@ Layout matches TODO requirements:
 import os
 import sys
 import gradio as gr
-from swiftmap import _gradio_compat  # noqa: F401  (patches gradio_client schema parsing)
+from swiftmap.frontend import _gradio_compat  # noqa: F401  (patches gradio_client schema parsing)
 import numpy as np
 import time
 import threading
@@ -32,7 +32,7 @@ vggt_root = os.path.dirname(os.path.dirname(current_dir))
 if vggt_root not in sys.path:
     sys.path.append(vggt_root)
 
-from swiftmap.core.keyframe_selector import KeyframeSelector
+from swiftmap.core.session import MappingSession
 from swiftmap.core.vggt_mapper import VGGTMapper
 
 
@@ -53,7 +53,7 @@ class MappingGradioInterface:
         self.port = port
         
         # Core system components
-        self.keyframe_selector = None
+        self.session = None
         self.vggt_mapper = VGGTMapper()
         
         # Interface state
@@ -305,18 +305,18 @@ class MappingGradioInterface:
             if self.server_running:
                 return "Already running", "TCP server is already running"
             
-            # Create keyframe selector with specified parameters
-            self.keyframe_selector = KeyframeSelector(
+            # Create the mapping session (owns TCP transport + keyframe selector)
+            self.session = MappingSession(
                 port=int(tcp_port),
                 min_disparity=float(min_disparity),
                 visualize_flow=visualize_flow
             )
             
             # Add callback for keyframe notifications
-            self.keyframe_selector.add_keyframe_callback(self._on_keyframe_selected)
+            self.session.add_keyframe_callback(self._on_keyframe_selected)
             
             # Start server in background thread
-            if self.keyframe_selector.start():
+            if self.session.start():
                 self.server_running = True
                 status = "Running"
                 log_msg = f"TCP server started on port {tcp_port} with min_disparity={min_disparity}"
@@ -337,11 +337,11 @@ class MappingGradioInterface:
             Tuple of (status_message, keyframe_count, log_message)
         """
         try:
-            if not self.server_running or not self.keyframe_selector:
+            if not self.server_running or not self.session:
                 return "Stopped", 0, "TCP server was not running"
             
-            self.keyframe_selector.stop()
-            keyframes = self.keyframe_selector.get_keyframe_count()
+            self.session.stop()
+            keyframes = self.session.get_keyframe_count()
             self.server_running = False
             
             log_msg = f"TCP server stopped. Collected {keyframes} keyframes."
@@ -359,8 +359,8 @@ class MappingGradioInterface:
             Tuple of (keyframe_count, log_message)
         """
         try:
-            if self.keyframe_selector:
-                self.keyframe_selector.clear_keyframes()
+            if self.session:
+                self.session.clear_keyframes()
                 return 0, "Keyframes cleared successfully"
             else:
                 return 0, "No keyframe selector active"
@@ -381,11 +381,11 @@ class MappingGradioInterface:
             Tuple of (model_file, processing_status, log_message, keyframe_count)
         """
         try:
-            if not self.keyframe_selector:
+            if not self.session:
                 return None, "Error", "No keyframe selector active", 0
             
             # Get collected keyframe paths
-            keyframe_paths = self.keyframe_selector.get_keyframe_paths()
+            keyframe_paths = self.session.get_keyframe_paths()
             
             if not keyframe_paths:
                 return None, "No keyframes", "No keyframes collected yet", 0
@@ -497,8 +497,8 @@ class MappingGradioInterface:
             conf_threshold = 60.0 if conf_threshold is None else float(conf_threshold)
 
             # Lazy import so the rest of the app works even without viser installed
-            from swiftmap.nfn import NextFlightPlanner
-            from swiftmap.nfn.visualization.nfn_viser_viewer import visualize_nfn_with_viser
+            from swiftmap.core.nfn import NextFlightPlanner
+            from swiftmap.frontend.viewers.viser_view import visualize_nfn_with_viser
 
             # Confidence-difference plan: points in the loose..strict confidence band
             # (default 60th..80th percentile) are the regions to improve next.
@@ -597,9 +597,9 @@ class MappingGradioInterface:
             keyframe_count = 0
             stats = {}
             
-            if self.keyframe_selector:
-                keyframe_count = self.keyframe_selector.get_keyframe_count()
-                stats = self.keyframe_selector.get_stats()
+            if self.session:
+                keyframe_count = self.session.get_keyframe_count()
+                stats = self.session.get_stats()
                 
                 # Add server status
                 stats["server_running"] = self.server_running
@@ -636,7 +636,7 @@ class MappingGradioInterface:
             "server_name": self.host,
             "server_port": self.port,
             "share": False,
-            "inbrowser": True
+            "inbrowser": False
         }
         launch_params.update(kwargs)
         
