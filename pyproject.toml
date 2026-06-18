@@ -1,0 +1,37 @@
+[project]
+name = "swiftmap"
+version = "0.1.0"
+description = "AI-in-the-loop iterative drone mapping (VGGT) with Next Flight Navigation"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+license = { text = "GPL-2.0-only" }
+
+dependencies = [
+    # Core: VGGT model + inference
+    "torch==2.3.1",
+    "torchvision==0.18.1",
+    "numpy<2",
+    "Pillow",
+    "einops",
+    "safetensors",
+    "huggingface_hub",
+    "opencv-python",
+
+    # 3D content generation & geometry
+    "trimesh",
+    "scipy",
+    "matplotlib",
+    "requests",
+    "gradio==5.17.1",
+    "viser==0.2.23",
+
+    # Sky masking via skyseg.onnx (model auto-downloaded on first use).
+    # On by default (--mask-sky), so kept in the core set.
+    "onnxruntime",
+]
+
+[tool.uv]
+# This repo is run from its own root (it imports both the `swiftmap` package and
+# the vendored, un-packaged `vggt/` namespace dir via the working directory), so
+# uv manages the venv + dependencies without building/installing it as a wheel.
+package = false

@@ -18,6 +18,7 @@ Layout matches TODO requirements:
 import os
 import sys
 import gradio as gr
+from swiftmap import _gradio_compat  # noqa: F401  (patches gradio_client schema parsing)
 import numpy as np
 import time
 import threading
@@ -114,7 +115,7 @@ class MappingGradioInterface:
                 with gr.Column():
                     gr.HTML("<h3 style='text-align: center;'>Confidence Map (NFN)</h3>")
                     confidence_viewer = gr.Model3D(
-                        label="Confidence Map", 
+                        label="Confidence Map",
                         height=500,
                         camera_position=(2, 2, 2)
                     )
