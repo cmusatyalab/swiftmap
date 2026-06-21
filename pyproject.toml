@@ -22,6 +22,7 @@ dependencies = [
     "scipy",
     "matplotlib",
     "requests",
+    "pymap3d",          # ENU <-> geodetic (GPS) conversion for geo-alignment
     "gradio==5.17.1",
     "viser==0.2.23",
 

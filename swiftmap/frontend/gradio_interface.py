@@ -23,7 +23,7 @@ import numpy as np
 import time
 import threading
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Dict, Tuple
 import json
 
 # Add vggt root to path
@@ -33,7 +33,6 @@ if vggt_root not in sys.path:
     sys.path.append(vggt_root)
 
 from swiftmap.core.session import MappingSession
-from swiftmap.core.vggt_mapper import VGGTMapper
 
 
 class MappingGradioInterface:
@@ -51,15 +50,14 @@ class MappingGradioInterface:
         """
         self.host = host
         self.port = port
-        
-        # Core system components
-        self.session = None
-        self.vggt_mapper = VGGTMapper()
-        
+
+        # The mapping pipeline orchestrator (owns transport, selector, mapper, planner).
+        # Long-lived: created once so the VGGT model persists across capture start/stop.
+        self.session = MappingSession(host=host)
+
         # Interface state
         self.server_running = False
         self.processing_active = False
-        self.last_update_time = None
 
         # NFN (Next Flight Navigation) Viser server state
         self.nfn_server = None
@@ -188,7 +186,20 @@ class MappingGradioInterface:
                                 value=self.default_params["mask_dynamic"],
                                 label="Filter Dynamic Objects"
                             )
-                        
+
+                            # GPS alignment: upload a GPS trace CSV and align the
+                            # reconstruction so NFN viewpoints get real lat/lon/alt.
+                            gps_csv_input = gr.File(
+                                label="GPS Traces CSV (latitude, longitude, altitude)",
+                                file_types=[".csv"]
+                            )
+                            calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment", variant="secondary")
+                            gps_status = gr.Textbox(
+                                label="GPS Alignment",
+                                value="Not aligned",
+                                interactive=False
+                            )
+
                         with gr.Column():
                             # Processing buttons
                             process_keyframes_btn = gr.Button("🔄 Process Keyframes with VGGT", variant="primary")
@@ -258,6 +269,12 @@ class MappingGradioInterface:
                 outputs=[confidence_viewer, processing_log]
             )
 
+            calibrate_gps_btn.click(
+                fn=self._calibrate_gps,
+                inputs=[gps_csv_input],
+                outputs=[gps_status, processing_log]
+            )
+
             analyze_nfn_btn.click(
                 fn=self._run_nfn,
                 inputs=[conf_threshold_slider],
@@ -304,19 +321,11 @@ class MappingGradioInterface:
         try:
             if self.server_running:
                 return "Already running", "TCP server is already running"
-            
-            # Create the mapping session (owns TCP transport + keyframe selector)
-            self.session = MappingSession(
-                port=int(tcp_port),
-                min_disparity=float(min_disparity),
-                visualize_flow=visualize_flow
-            )
-            
-            # Add callback for keyframe notifications
-            self.session.add_keyframe_callback(self._on_keyframe_selected)
-            
-            # Start server in background thread
-            if self.session.start():
+
+            # Start collection on the (long-lived) session with the chosen settings.
+            if self.session.start(port=int(tcp_port),
+                                  min_disparity=float(min_disparity),
+                                  visualize_flow=visualize_flow):
                 self.server_running = True
                 status = "Running"
                 log_msg = f"TCP server started on port {tcp_port} with min_disparity={min_disparity}"
@@ -381,18 +390,8 @@ class MappingGradioInterface:
             Tuple of (model_file, processing_status, log_message, keyframe_count)
         """
         try:
-            if not self.session:
-                return None, "Error", "No keyframe selector active", 0
-            
-            # Get collected keyframe paths
-            keyframe_paths = self.session.get_keyframe_paths()
-            
-            if not keyframe_paths:
-                return None, "No keyframes", "No keyframes collected yet", 0
-            
             self.processing_active = True
-            
-            # Prepare processing parameters
+
             processing_params = {
                 "conf_threshold": float(conf_threshold),
                 "mask_sky": mask_sky,
@@ -401,26 +400,23 @@ class MappingGradioInterface:
                 "mask_white_bg": False,
                 "show_cam": True
             }
-            
-            log_msg = f"Processing {len(keyframe_paths)} keyframes..."
-            
-            # Process keyframes with VGGT
-            results = self.vggt_mapper.process_keyframes(keyframe_paths, processing_params)
-            
-            if results["success"]:
+
+            # Reconstruct the collected keyframes via the session.
+            results = self.session.reconstruct(processing_params)
+            keyframe_count = results.get("keyframe_count", self.session.get_keyframe_count())
+
+            if results.get("success"):
                 glb_path = results["scene_results"].get("glb_path")
                 processing_time = results["timing"]["total_processing"]
-                
                 status = f"Completed in {processing_time:.1f}s"
                 log_msg = f"VGGT processing completed in {processing_time:.1f}s. Model saved to {glb_path}"
-                
                 self.processing_active = False
-                return glb_path, status, log_msg, len(keyframe_paths)
+                return glb_path, status, log_msg, keyframe_count
             else:
                 error_msg = results.get("error", "Unknown error")
                 self.processing_active = False
-                return None, "Failed", f"Processing failed: {error_msg}", len(keyframe_paths)
-                
+                return None, "Failed", f"Processing failed: {error_msg}", keyframe_count
+
         except Exception as e:
             self.processing_active = False
             return None, "Error", f"Error processing keyframes: {str(e)}", 0
@@ -436,41 +432,42 @@ class MappingGradioInterface:
             Tuple of (confidence_model_file, log_message)
         """
         try:
-            # Get latest results from VGGT mapper
-            latest_results = self.vggt_mapper.get_latest_results()
-            
-            if "error" in latest_results:
-                return None, "No VGGT processing results available. Process keyframes first."
-            
-            # Check if confidence mapping was already generated
-            if latest_results.get("confidence_scene"):
-                # Re-export with new threshold if needed
-                processing_params = {"conf_threshold": float(conf_threshold)}
-                predictions = latest_results["predictions"]
-                
-                # Get target directory from latest results
-                target_dir = latest_results.get("scene_results", {}).get("target_directory")
-                if not target_dir:
-                    return None, "No target directory available. Please process keyframes first to create input_stream directory."
-                confidence_results = self.vggt_mapper._generate_confidence_mapping(predictions, processing_params, target_dir)
-                
-                if "error" not in confidence_results:
-                    conf_glb_path = confidence_results.get("glb_path")
-                    stats = confidence_results.get("statistics", {})
-                    
-                    high_conf = stats.get("high_conf_points", 0)
-                    total_points = stats.get("total_points", 0)
-                    
-                    log_msg = f"Confidence map generated: {high_conf}/{total_points} high-confidence points"
-                    
-                    return conf_glb_path, log_msg
-                else:
-                    return None, f"Confidence map generation failed: {confidence_results['error']}"
-            else:
-                return None, "No confidence data available. Process keyframes first."
-                
+            confidence_results = self.session.generate_confidence_map(conf_threshold)
+
+            if "error" in confidence_results:
+                return None, confidence_results["error"]
+
+            conf_glb_path = confidence_results.get("glb_path")
+            stats = confidence_results.get("statistics", {})
+            high_conf = stats.get("high_conf_points", 0)
+            total_points = stats.get("total_points", 0)
+            log_msg = f"Confidence map generated: {high_conf}/{total_points} high-confidence points"
+            return conf_glb_path, log_msg
+
         except Exception as e:
             return None, f"Error generating confidence map: {str(e)}"
+
+    def _calibrate_gps(self, gps_file) -> Tuple[str, str]:
+        """Align the reconstruction to a GPS trace CSV (so NFN viewpoints get GPS)."""
+        try:
+            if gps_file is None:
+                return "Not aligned", "GPS: upload a GPS trace CSV first."
+            # gr.File gives a filepath string (or an object with .name).
+            gps_path = getattr(gps_file, "name", gps_file)
+
+            cfg = self.session.calibrate_gps(gps_path)
+            if "error" in cfg:
+                return "Not aligned", f"GPS: {cfg['error']}"
+
+            status = (f"✅ Aligned — scale {cfg['scale']:.3f}, "
+                      f"RMSE {cfg['rmse']:.2f} m ({cfg['num_points']} pts)")
+            log = (f"GPS alignment: scale={cfg['scale']:.4f}, RMSE={cfg['rmse']:.3f} m "
+                   f"(init {cfg['init_rmse']:.3f} m, {cfg['num_points']} pts).\n"
+                   f"Origin ({cfg['lat0']:.6f}, {cfg['lon0']:.6f}, {cfg['alt0']:.1f}).\n"
+                   f"NFN viewpoints will now include GPS coordinates.")
+            return status, log
+        except Exception as e:
+            return "Not aligned", f"GPS calibration error: {e}"
 
     def _run_nfn(self, conf_threshold: float) -> Tuple[str, str]:
         """
@@ -484,25 +481,16 @@ class MappingGradioInterface:
             Tuple of (markdown_link, log_message).
         """
         try:
-            latest_results = self.vggt_mapper.get_latest_results()
-            if "error" in latest_results:
-                return "⚠️ No VGGT results yet — process keyframes first.", \
-                       "NFN: no reconstruction available"
+            # Compute the next-flight plan via the session (NFN on the latest run).
+            plan = self.session.plan(low_percentile=60.0, high_percentile=80.0)
+            if "error" in plan:
+                return f"⚠️ {plan['error']}", f"NFN: {plan['error']}"
 
-            predictions = latest_results["predictions"]
-            if "world_points" not in predictions or "world_points_conf" not in predictions:
-                return "⚠️ Predictions have no world points — cannot run NFN.", \
-                       "NFN: missing world_points"
-
+            predictions = self.session.latest_predictions
             conf_threshold = 60.0 if conf_threshold is None else float(conf_threshold)
 
             # Lazy import so the rest of the app works even without viser installed
-            from swiftmap.core.nfn import NextFlightPlanner
             from swiftmap.frontend.viewers.viser_view import visualize_nfn_with_viser
-
-            # Confidence-difference plan: points in the loose..strict confidence band
-            # (default 60th..80th percentile) are the regions to improve next.
-            plan = NextFlightPlanner(low_percentile=60.0, high_percentile=80.0).plan(predictions)
 
             # (Re)start the Viser viewer on a fixed port
             if self.nfn_server is not None:
@@ -541,13 +529,18 @@ class MappingGradioInterface:
                 f"{stats.get('num_clusters', 0)} clusters | {n_vp} viewpoints",
                 "Suggested viewpoints  [#] position (x, y, z) -> look-dir (dx, dy, dz):",
             ]
+            gps_aligned = any("camera_position_gps" in vp for vp in plan.get("viewpoints", []))
+            if gps_aligned:
+                log_lines[-1] += "  [GPS: lat, lon, alt]"
             for i, vp in enumerate(plan.get("viewpoints", [])):
                 p = np.asarray(vp["camera_position"])
                 d = np.asarray(vp["camera_rotation"])[:, 2]  # +Z = camera forward / look direction
-                log_lines.append(
-                    f"  #{i:02d}  pos=({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f})  "
-                    f"dir=({d[0]:.2f}, {d[1]:.2f}, {d[2]:.2f})"
-                )
+                line = (f"  #{i:02d}  pos=({p[0]:.3f}, {p[1]:.3f}, {p[2]:.3f})  "
+                        f"dir=({d[0]:.2f}, {d[1]:.2f}, {d[2]:.2f})")
+                gps = vp.get("camera_position_gps")
+                if gps:
+                    line += f"  gps=({gps[0]:.6f}, {gps[1]:.6f}, {gps[2]:.1f})"
+                log_lines.append(line)
             log_lines.append(f"Viewer: {url}")
             log_msg = "\n".join(log_lines)
             return link_md, log_msg
@@ -563,26 +556,23 @@ class MappingGradioInterface:
             Log message
         """
         try:
-            if not self.vggt_mapper.latest_predictions:
+            if not self.session.latest_predictions:
                 return "No results to export. Process keyframes first."
-            
-            # Get latest target directory or create new one
-            latest_results = self.vggt_mapper.get_latest_results()
-            target_dir = latest_results.get("scene_results", {}).get("target_directory")
-            
-            if not target_dir:
-                # Create new input_stream directory if none exists
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                target_dir = f"input_stream_{timestamp}"
-                os.makedirs(target_dir, exist_ok=True)
-            
-            # Export camera poses to the input_stream directory
-            poses_path = os.path.join(target_dir, "camera_poses.json")
-            if self.vggt_mapper.save_camera_poses_json(poses_path):
-                return f"Camera poses exported to {poses_path}"
-            else:
-                return "Failed to export camera poses"
-                
+
+            msgs = []
+            poses_path = self.session.export_camera_poses()
+            msgs.append(f"Camera poses → {poses_path}" if poses_path
+                        else "Failed to export camera poses")
+
+            # NFN plan (+ transform.json if GPS-aligned), if NFN has been run.
+            nfn_path = self.session.export_nfn_plan()
+            if nfn_path:
+                msgs.append(f"NFN viewpoints → {nfn_path}")
+                if self.session.gps_transform is not None:
+                    msgs.append("GPS transform → transform.json")
+
+            return "\n".join(msgs)
+
         except Exception as e:
             return f"Error exporting results: {str(e)}"
     
@@ -610,17 +600,6 @@ class MappingGradioInterface:
             
         except Exception as e:
             return 0, {"error": str(e)}
-    
-    def _on_keyframe_selected(self, keyframe_info: Dict[str, Any]):
-        """
-        Callback for keyframe selection notifications.
-        
-        Args:
-            keyframe_info: Information about selected keyframe
-        """
-        # This could be used for real-time updates or notifications
-        # For now, just update the last update time
-        self.last_update_time = datetime.now()
     
     def launch(self, **kwargs) -> None:
         """

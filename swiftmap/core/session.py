@@ -3,47 +3,65 @@
 """
 Mapping Session
 
-Orchestrates a live mapping run. The session owns its two collaborators -- the
-TCP transport (:class:`MappingTCPServer`) and the pure
-:class:`KeyframeSelector` -- and wires received frames through selection:
+The orchestration layer for one mapping run. A ``MappingSession`` is the single
+middle layer between the frontend and the core stages — it owns and coordinates
+all of them:
 
-    drone --TCP--> MappingTCPServer --frame--> MappingSession._on_frame
-                                                    -> KeyframeSelector.is_keyframe
+    collection :  MappingTCPServer (transport) + KeyframeSelector (decision)
+    mapping    :  VGGTMapper       (reconstruction + confidence)
+    planning   :  NextFlightPlanner (NFN)
 
-The frontend drives the session (start / stop / clear) and reads collected
-keyframes from it; it never touches sockets or the selector directly. This keeps
-networking out of both the keyframe selector (pure domain logic) and the UI.
+The pipeline for a run:
+
+    drone --TCP--> tcp_server --frame--> _on_frame -> selector.is_keyframe   (collect)
+    reconstruct() -> mapper.process_keyframes(<collected keyframes>)         (map)
+    generate_confidence_map() / plan()                                        (evaluate + replan)
+
+The frontend drives the session (start/stop, reconstruct, plan, export) and reads
+state from it; it never touches sockets, the model, or the planner directly. The
+session is long-lived — created once — so the (expensive) VGGT model persists
+across capture start/stop cycles. ``start(port, …)`` controls only the transport.
 """
 
 import os
 import threading
 from datetime import datetime
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict, List, Optional
 
 import cv2
+import numpy as np
 
 from swiftmap.core.keyframe_selector import KeyframeSelector
 from swiftmap.core.tcp_server import MappingTCPServer
+from swiftmap.core.vggt_mapper import VGGTMapper
+from swiftmap.core.nfn import NextFlightPlanner
 
 
 class MappingSession:
-    """Owns the TCP transport + keyframe selector and wires them together."""
+    """Owns and coordinates the full mapping pipeline for one run."""
 
     def __init__(self,
                  host: str = "0.0.0.0",
-                 port: int = 43322,
                  min_disparity: float = 40.0,
                  visualize_flow: bool = False):
         self.host = host
-        self.port = port
 
+        # Core stages (all long-lived; the model loads lazily on first reconstruct).
         self.selector = KeyframeSelector(min_disparity=min_disparity,
                                          visualize_flow=visualize_flow)
-        self.tcp_server = MappingTCPServer(host=host, port=port,
-                                           keyframe_callback=self._on_frame)
+        self.mapper = VGGTMapper()
+        self.planner = NextFlightPlanner()
 
-        # Collected keyframe file paths, accumulated as the server's queue drains
-        # (the server's getter is destructive, so we keep our own running list).
+        # Optional local->GPS alignment (set via calibrate_gps()).
+        self.gps_transform = None
+        # Latest NFN plan (set by plan(); used by export).
+        self.latest_plan = None
+
+        # Transport is created on start() (its port is chosen then).
+        self.tcp_server: Optional[MappingTCPServer] = None
+        self.port: Optional[int] = None
+
+        # Collected keyframe file paths, accumulated as the server queue drains.
         self._keyframe_paths: List[str] = []
         self._paths_lock = threading.Lock()
         self._keyframe_count = 0
@@ -52,43 +70,27 @@ class MappingSession:
         self.server_thread = None
         self.start_time = None
 
-        self.keyframe_callbacks: List[Callable[[Dict[str, Any]], None]] = []
-
-    # ------------------------------------------------------------------ wiring
-    def _on_frame(self, image, metadata: Dict[str, Any]) -> bool:
-        """TCP-server callback: run selection, notify listeners on a keyframe."""
-        is_keyframe = self.selector.is_keyframe(image)
-        if is_keyframe:
-            self._keyframe_count += 1
-            self._notify({
-                "image": image,
-                "metadata": metadata,
-                "keyframe_count": self._keyframe_count,
-                "frame_tracker_stats": self.selector.frame_tracker.get_stats(),
-            })
-        return is_keyframe
-
-    def add_keyframe_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """Register a callback invoked whenever a keyframe is selected."""
-        self.keyframe_callbacks.append(callback)
-
-    def _notify(self, info: Dict[str, Any]):
-        for callback in self.keyframe_callbacks:
-            try:
-                callback(info)
-            except Exception as e:
-                print(f"Error in keyframe callback: {e}")
-
-    # --------------------------------------------------------------- lifecycle
-    def start(self) -> bool:
-        """Initialize the TCP server and start receiving frames."""
+    # ============================================================ collection stage
+    def start(self,
+              port: int = 43322,
+              min_disparity: Optional[float] = None,
+              visualize_flow: Optional[bool] = None) -> bool:
+        """Start the TCP transport and begin collecting keyframes."""
         if self.is_running:
             print("Mapping session already running")
             return True
 
+        if min_disparity is not None:
+            self.selector.configure_disparity_threshold(min_disparity)
+        if visualize_flow is not None:
+            self.selector.visualize_flow = visualize_flow
+
+        self.port = port
+        self.tcp_server = MappingTCPServer(host=self.host, port=port,
+                                           keyframe_callback=self._on_frame)
+
         print("Starting SwiftMap Mapping Session...")
-        print(f"Server: {self.host}:{self.port}")
-        print(f"Min disparity threshold: {self.selector.min_disparity} pixels")
+        print(f"Server: {self.host}:{port} | min disparity: {self.selector.min_disparity} px")
 
         if not self.tcp_server.initialize():
             print("Failed to initialize TCP server")
@@ -109,23 +111,30 @@ class MappingSession:
         return True
 
     def stop(self):
-        """Stop the TCP server and the session."""
+        """Stop the TCP transport (the session and its model stay alive)."""
         if not self.is_running:
             return
         print("Stopping SwiftMap Mapping Session...")
         self.is_running = False
-        self.tcp_server.stop_server()
+        if self.tcp_server:
+            self.tcp_server.stop_server()
         if self.server_thread:
             self.server_thread.join(timeout=2.0)
         cv2.destroyAllWindows()  # close optical-flow visualization windows, if any
         print("Mapping session stopped")
 
-    # ----------------------------------------------------------- keyframe access
-    def _drain(self):
-        """Pull newly-collected keyframes from the server queue into our list.
+    def _on_frame(self, image, metadata: Dict[str, Any]) -> bool:
+        """TCP-server callback: run selection on each frame, count keyframes."""
+        is_keyframe = self.selector.is_keyframe(image)
+        if is_keyframe:
+            self._keyframe_count += 1
+        return is_keyframe
 
-        ``tcp_server.get_collected_keyframes()`` drains its internal queue, so we
-        accumulate the paths here to keep them across repeated reads."""
+    def _drain(self):
+        """Pull newly-collected keyframes from the server queue into our list
+        (the server's getter drains its internal queue)."""
+        if not self.tcp_server:
+            return
         for kf in self.tcp_server.get_collected_keyframes():
             path = kf.get("path")
             if path and os.path.exists(path):
@@ -144,7 +153,8 @@ class MappingSession:
 
     def clear_keyframes(self):
         """Discard all collected keyframes and reset selection state."""
-        self.tcp_server.clear_keyframes()
+        if self.tcp_server:
+            self.tcp_server.clear_keyframes()
         self.selector.reset()
         with self._paths_lock:
             self._keyframe_paths.clear()
@@ -153,11 +163,171 @@ class MappingSession:
     def configure_disparity_threshold(self, min_disparity: float):
         self.selector.configure_disparity_threshold(min_disparity)
 
-    # -------------------------------------------------------------------- stats
+    # =============================================================== mapping stage
+    def reconstruct(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run VGGT reconstruction on the collected keyframes."""
+        paths = self.get_keyframe_paths()
+        if not paths:
+            return {"success": False, "error": "No keyframes collected yet",
+                    "keyframe_count": 0}
+        return self.mapper.process_keyframes(paths, params)
+
+    def get_latest_results(self) -> Dict[str, Any]:
+        """Latest reconstruction results (or {'error': ...} if none yet)."""
+        return self.mapper.get_latest_results()
+
+    @property
+    def latest_predictions(self) -> Optional[Dict[str, Any]]:
+        """The latest raw VGGT predictions, or None if nothing processed yet."""
+        return self.mapper.latest_predictions
+
+    def generate_confidence_map(self, conf_threshold: float) -> Dict[str, Any]:
+        """(Re)generate the map-quality (confidence) point cloud from the latest run."""
+        latest = self.mapper.get_latest_results()
+        if "error" in latest:
+            return {"error": "No VGGT processing results available. Process keyframes first."}
+        if not latest.get("confidence_scene"):
+            return {"error": "No confidence data available. Process keyframes first."}
+        target_dir = latest.get("scene_results", {}).get("target_directory")
+        if not target_dir:
+            return {"error": "No target directory available. Process keyframes first."}
+        params = {"conf_threshold": float(conf_threshold)}
+        return self.mapper._generate_confidence_mapping(
+            latest["predictions"], params, target_dir)
+
+    # ============================================================== planning stage
+    def plan(self, low_percentile: float = 60.0,
+             high_percentile: float = 80.0) -> Dict[str, Any]:
+        """Run Next Flight Navigation on the latest reconstruction.
+
+        Returns the plan dict, or {'error': ...} if there's no usable reconstruction.
+        """
+        latest = self.mapper.get_latest_results()
+        if "error" in latest:
+            return {"error": "No VGGT results yet — process keyframes first."}
+        predictions = latest.get("predictions", {})
+        if "world_points" not in predictions or "world_points_conf" not in predictions:
+            return {"error": "Predictions have no world points — cannot run NFN."}
+        self.planner.low_percentile = low_percentile
+        self.planner.high_percentile = high_percentile
+        plan = self.planner.plan(predictions)
+
+        # If a GPS alignment exists, tag each viewpoint with real [lat, lon, alt].
+        if self.gps_transform is not None:
+            for vp in plan.get("viewpoints", []):
+                vp["camera_position_gps"] = self.to_gps(vp["camera_position"]).tolist()
+
+        self.latest_plan = plan
+        return plan
+
+    # ========================================================= geo-alignment stage
+    def calibrate_gps(self, gps_lla, use_icp: bool = True) -> Dict[str, Any]:
+        """Align the reconstruction to GPS using the keyframe camera trajectory.
+
+        Args:
+            gps_lla: GPS trajectory as an (M, 3) array of [lat, lon, alt], or a path
+                     to a CSV with latitude/longitude/altitude columns. Capture order;
+                     count need not match the keyframes (trajectory alignment via ICP).
+            use_icp: refine the initial Umeyama fit with ICP.
+
+        Returns the transform config (scale, rotation, translation, origin, rmse),
+        or {'error': ...} if there's no reconstruction to align.
+        """
+        from swiftmap.core import geo
+
+        preds = self.mapper.latest_predictions
+        if not preds or "camera_positions" not in preds:
+            return {"error": "No reconstruction with camera poses yet — process keyframes first."}
+
+        if isinstance(gps_lla, str):
+            gps_lla = geo.load_gps_csv(gps_lla)
+
+        slam_xyz = np.asarray(preds["camera_positions"]).reshape(-1, 3)
+        try:
+            self.gps_transform, cfg = geo.GpsTransform.from_calibration(
+                slam_xyz, gps_lla, use_icp=use_icp)
+        except Exception as e:
+            return {"error": f"GPS alignment failed: {e}"}
+        print(f"GPS aligned: scale={cfg['scale']:.3f}, RMSE={cfg['rmse']:.3f} m "
+              f"({cfg['num_points']} points)")
+        return cfg
+
+    def to_gps(self, points):
+        """Convert local point(s) to GPS [lat, lon, alt]; None if not calibrated."""
+        if self.gps_transform is None:
+            return None
+        return self.gps_transform.to_lla(points)
+
+    def _target_dir(self) -> str:
+        """The current run's output directory (created if there isn't one yet)."""
+        latest = self.mapper.get_latest_results()
+        target_dir = latest.get("scene_results", {}).get("target_directory")
+        if not target_dir:
+            target_dir = f"input_stream_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            os.makedirs(target_dir, exist_ok=True)
+        return target_dir
+
+    def export_nfn_plan(self) -> Optional[str]:
+        """Write the latest NFN plan (GPS-tagged when aligned) to the run dir.
+
+        Writes ``next_flight_viewpoints.json`` (+ ``transform.json`` if GPS-aligned)
+        and returns the viewpoints path, or None if there's no plan yet.
+        """
+        if not self.latest_plan:
+            return None
+        import json
+
+        target_dir = self._target_dir()
+        viewpoints = []
+        for vp in self.latest_plan.get("viewpoints", []):
+            item = {
+                "cluster_id": int(vp.get("cluster_id", -1)),
+                "position": np.asarray(vp["camera_position"], dtype=float).tolist(),
+                "look_dir": np.asarray(vp["camera_rotation"], dtype=float)[:, 2].tolist(),
+                "target": np.asarray(vp["target"], dtype=float).tolist(),
+                "score": float(vp.get("score", 0.0)),
+            }
+            if "camera_position_gps" in vp:
+                item["gps"] = vp["camera_position_gps"]  # [lat, lon, alt]
+            viewpoints.append(item)
+
+        out = {
+            "num_viewpoints": len(viewpoints),
+            "thresholds": self.latest_plan.get("thresholds", {}),
+            "gps_aligned": self.gps_transform is not None,
+            "viewpoints": viewpoints,
+        }
+        path = os.path.join(target_dir, "next_flight_viewpoints.json")
+        with open(path, "w") as f:
+            json.dump(out, f, indent=2)
+
+        if self.gps_transform is not None:
+            with open(os.path.join(target_dir, "transform.json"), "w") as f:
+                json.dump(self.gps_transform.cfg, f, indent=2)
+
+        return path
+
+    # ================================================================ export stage
+    def export_camera_poses(self) -> Optional[str]:
+        """Write estimated camera poses to the run's output dir; return the path."""
+        if not self.mapper.latest_predictions:
+            return None
+        latest = self.mapper.get_latest_results()
+        target_dir = latest.get("scene_results", {}).get("target_directory")
+        if not target_dir:
+            target_dir = f"input_stream_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            os.makedirs(target_dir, exist_ok=True)
+        poses_path = os.path.join(target_dir, "camera_poses.json")
+        if self.mapper.save_camera_poses_json(poses_path):
+            return poses_path
+        return None
+
+    # ======================================================================= stats
     def get_stats(self) -> Dict[str, Any]:
         """Combined session statistics (selection + transport)."""
         stats = self.selector.get_stats()
-        stats["tcp_server_stats"] = self.tcp_server.get_stats()
+        if self.tcp_server:
+            stats["tcp_server_stats"] = self.tcp_server.get_stats()
         stats["keyframes_selected"] = self._keyframe_count
         if self.start_time:
             stats["session_duration"] = str(datetime.now() - self.start_time)
