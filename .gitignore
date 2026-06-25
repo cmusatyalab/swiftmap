@@ -23,3 +23,7 @@ skyseg.onnx
 # Misc
 .DS_Store
 .gradio/
+
+
+# Test
+test/data

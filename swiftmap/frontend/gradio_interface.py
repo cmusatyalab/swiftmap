@@ -144,7 +144,12 @@ class MappingGradioInterface:
                                 value=self.default_params["visualize_flow"],
                                 label="Show Optical Flow Visualization"
                             )
-                        
+
+                            keep_all_checkbox = gr.Checkbox(
+                                value=False,
+                                label="Keep all frames (skip keyframe selection)"
+                            )
+
                         with gr.Column():
                             # Server control buttons
                             start_server_btn = gr.Button("🚀 Start SwiftMap Mapping Engine", variant="primary")
@@ -242,7 +247,7 @@ class MappingGradioInterface:
             # TCP Server Controls
             start_server_btn.click(
                 fn=self._start_server,
-                inputs=[tcp_port_input, min_disparity_input, visualize_flow_checkbox],
+                inputs=[tcp_port_input, min_disparity_input, visualize_flow_checkbox, keep_all_checkbox],
                 outputs=[server_status, processing_log]
             )
             
@@ -306,15 +311,17 @@ class MappingGradioInterface:
         
         return interface
     
-    def _start_server(self, tcp_port: int, min_disparity: float, visualize_flow: bool) -> Tuple[str, str]:
+    def _start_server(self, tcp_port: int, min_disparity: float, visualize_flow: bool,
+                      keep_all: bool = False) -> Tuple[str, str]:
         """
         Start the TCP server for keyframe collection.
-        
+
         Args:
             tcp_port: TCP port number
             min_disparity: Minimum disparity threshold
             visualize_flow: Enable optical flow visualization
-            
+            keep_all: keep every frame (skip keyframe selection)
+
         Returns:
             Tuple of (status_message, log_message)
         """
@@ -325,10 +332,12 @@ class MappingGradioInterface:
             # Start collection on the (long-lived) session with the chosen settings.
             if self.session.start(port=int(tcp_port),
                                   min_disparity=float(min_disparity),
-                                  visualize_flow=visualize_flow):
+                                  visualize_flow=visualize_flow,
+                                  keep_all=keep_all):
                 self.server_running = True
                 status = "Running"
-                log_msg = f"TCP server started on port {tcp_port} with min_disparity={min_disparity}"
+                mode = "keep ALL frames" if keep_all else f"min_disparity={min_disparity}"
+                log_msg = f"TCP server started on port {tcp_port} ({mode})"
             else:
                 status = "Failed to start"
                 log_msg = "Failed to start TCP server"

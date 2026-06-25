@@ -21,15 +21,20 @@ from swiftmap.core.keyframe_selector.frame_tracker import FrameTracker
 class KeyframeSelector:
     """Optical-flow keyframe selector: a pure decision over a single frame."""
 
-    def __init__(self, min_disparity: float = 40.0, visualize_flow: bool = False):
+    def __init__(self, min_disparity: float = 40.0, visualize_flow: bool = False,
+                 keep_all: bool = False):
         """
         Args:
             min_disparity: minimum mean optical-flow disparity (pixels) for a frame
                            to be selected as a keyframe.
             visualize_flow: draw optical-flow vectors (debugging) in compute_disparity.
+            keep_all: if True, skip optical-flow selection and keep *every* frame as a
+                      keyframe (no thinning). Useful for a denser camera trajectory,
+                      but watch VGGT's batch/memory limit downstream.
         """
         self.min_disparity = min_disparity
         self.visualize_flow = visualize_flow
+        self.keep_all = keep_all
 
         # Stateful optical-flow tracker (tracks features vs. the last keyframe).
         self.frame_tracker = FrameTracker()
@@ -51,6 +56,10 @@ class KeyframeSelector:
             True if the frame's motion vs. the last keyframe exceeds min_disparity.
         """
         start = time.time()
+        if self.keep_all:
+            # Skip selection entirely -- every frame is a keyframe.
+            self._update_stats(time.time() - start, True)
+            return True
         try:
             selected = self.frame_tracker.compute_disparity(
                 image, self.min_disparity, self.visualize_flow

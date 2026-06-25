@@ -74,8 +74,13 @@ class MappingSession:
     def start(self,
               port: int = 43322,
               min_disparity: Optional[float] = None,
-              visualize_flow: Optional[bool] = None) -> bool:
-        """Start the TCP transport and begin collecting keyframes."""
+              visualize_flow: Optional[bool] = None,
+              keep_all: Optional[bool] = None) -> bool:
+        """Start the TCP transport and begin collecting keyframes.
+
+        If ``keep_all`` is True, keyframe selection is skipped and every received
+        frame is kept (denser trajectory; mind VGGT's batch limit).
+        """
         if self.is_running:
             print("Mapping session already running")
             return True
@@ -84,6 +89,8 @@ class MappingSession:
             self.selector.configure_disparity_threshold(min_disparity)
         if visualize_flow is not None:
             self.selector.visualize_flow = visualize_flow
+        if keep_all is not None:
+            self.selector.keep_all = keep_all
 
         self.port = port
         self.tcp_server = MappingTCPServer(host=self.host, port=port,
@@ -212,10 +219,12 @@ class MappingSession:
         self.planner.high_percentile = high_percentile
         plan = self.planner.plan(predictions)
 
-        # If a GPS alignment exists, tag each viewpoint with real [lat, lon, alt].
         if self.gps_transform is not None:
             for vp in plan.get("viewpoints", []):
-                vp["camera_position_gps"] = self.to_gps(vp["camera_position"]).tolist()
+                pos_gps = self.to_gps(vp["camera_position"]).tolist()  # [lat, lon, alt]
+                tgt_gps = self.to_gps(vp["target"]).tolist()
+                vp["camera_position_gps"] = pos_gps
+                vp["target_gps"] = tgt_gps
 
         self.latest_plan = plan
         return plan
@@ -279,16 +288,19 @@ class MappingSession:
 
         target_dir = self._target_dir()
         viewpoints = []
-        for vp in self.latest_plan.get("viewpoints", []):
+        for i, vp in enumerate(self.latest_plan.get("viewpoints", [])):
             item = {
-                "cluster_id": int(vp.get("cluster_id", -1)),
+                "id": i,                                   # matches Viser "v{i}" and the log "#{i}"
+                "cluster_id": int(vp.get("cluster_id", -1)),  # which ground-plane cell (not the marker label)
                 "position": np.asarray(vp["camera_position"], dtype=float).tolist(),
                 "look_dir": np.asarray(vp["camera_rotation"], dtype=float)[:, 2].tolist(),
                 "target": np.asarray(vp["target"], dtype=float).tolist(),
                 "score": float(vp.get("score", 0.0)),
             }
             if "camera_position_gps" in vp:
-                item["gps"] = vp["camera_position_gps"]  # [lat, lon, alt]
+                item["position_gps"] = vp["camera_position_gps"]  # drone waypoint [lat, lon, 0]
+            if "target_gps" in vp:
+                item["target_gps"] = vp["target_gps"]            # ground patch [lat, lon, 0]
             viewpoints.append(item)
 
         out = {
