@@ -45,6 +45,10 @@ class KeyframeSelector:
             "processing_times": [],
         }
 
+        # Per-selected-keyframe priority value (the disparity that selected it), in
+        # selection order. Used by the session to cap the keyframe count by priority.
+        self.keyframe_values = []
+
     def is_keyframe(self, image: np.ndarray) -> bool:
         """
         Decide whether ``image`` should be a keyframe.
@@ -57,8 +61,11 @@ class KeyframeSelector:
         """
         start = time.time()
         if self.keep_all:
-            # Skip selection entirely -- every frame is a keyframe.
+            # Skip selection entirely -- every frame is a keyframe. No disparity
+            # priority, so record 0.0 (the session falls back to even subsampling
+            # if it has to cap a keep-all run).
             self._update_stats(time.time() - start, True)
+            self.keyframe_values.append(0.0)
             return True
         try:
             selected = self.frame_tracker.compute_disparity(
@@ -68,6 +75,8 @@ class KeyframeSelector:
             print(f"Error in keyframe selection: {e}")
             selected = False
         self._update_stats(time.time() - start, selected)
+        if selected:
+            self.keyframe_values.append(float(self.frame_tracker.last_disparity))
         return selected
 
     def reset(self):
@@ -76,6 +85,7 @@ class KeyframeSelector:
         self.stats["total_frames_processed"] = 0
         self.stats["keyframes_selected"] = 0
         self.stats["processing_times"] = []
+        self.keyframe_values = []
 
     def configure_disparity_threshold(self, min_disparity: float):
         """Update the minimum disparity threshold."""

@@ -30,7 +30,11 @@ class FrameTracker:
         self.kf_pts = None
         self.kf_gray = None
         self.frame_count = 0
-        
+        # Disparity (motion vs. previous keyframe) of the most recent selection,
+        # used as a priority value when capping the keyframe count. Forced keyframes
+        # (the first frame / reinitializations) get +inf so they're always kept.
+        self.last_disparity = 0.0
+
         # Feature detection parameters
         self.max_corners = 1000
         self.quality_level = 0.01
@@ -98,6 +102,7 @@ class FrameTracker:
             if self.last_kf is None or self.kf_pts is None or len(self.kf_pts) < self.min_tracking_points:
                 success = self.initialize_keyframe(image)
                 if success:
+                    self.last_disparity = float("inf")  # anchor frame: always keep
                     print(f"Frame {self.frame_count}: First keyframe selected")
                 return success
             
@@ -122,12 +127,14 @@ class FrameTracker:
                 print(f"Frame {self.frame_count}: Insufficient tracking points ({len(good_kf)}), reinitializing keyframe")
                 success = self.initialize_keyframe(image)
                 if success:
+                    self.last_disparity = float("inf")  # forced keyframe: always keep
                     print(f"Frame {self.frame_count}: Keyframe selected (reinitialization)")
                 return success
             
             # Compute displacement between keyframe and current frame
             displacement = np.linalg.norm(good_next - good_kf, axis=1)
             mean_disparity = np.mean(displacement)
+            self.last_disparity = float(mean_disparity)
             
             # Optional visualization
             if visualize:
@@ -208,6 +215,7 @@ class FrameTracker:
         self.kf_pts = None
         self.kf_gray = None
         self.frame_count = 0
+        self.last_disparity = 0.0
         print("Frame tracker reset")
 
 

@@ -20,7 +20,7 @@ import time
 def visualize_nfn_with_viser(
     predictions: Dict,
     plan: Dict,
-    port: int = 8080,
+    port: int = 7867,
     conf_threshold: float = 50.0,
     background_mode: bool = False,
 ) -> Optional[viser.ViserServer]:
@@ -46,9 +46,10 @@ def visualize_nfn_with_viser(
     diag = float(plan.get("statistics", {}).get("scene_diagonal", 1.0)) or 1.0
 
     # Base reconstruction point cloud
+    base_point_size = diag * 0.0015
     pts0, col0 = filtered(conf_threshold)
     cloud = server.scene.add_point_cloud("/nfn/cloud", points=pts0, colors=col0,
-                                         point_size=diag * 0.0015)
+                                         point_size=base_point_size)
     print(f"[NFN Visualization] Base cloud: {len(pts0)}/{len(world_points)} points")
 
     # "To-improve" band points (red)
@@ -57,12 +58,13 @@ def visualize_nfn_with_viser(
         enhance = enhance[np.isfinite(enhance).all(1)]
     if len(enhance) > 60000:
         enhance = enhance[np.random.choice(len(enhance), 60000, replace=False)]
+    enhance_point_size = diag * 0.0012
     enhance_handle = None
     if len(enhance):
         enhance_handle = server.scene.add_point_cloud(
             "/nfn/to_improve", points=enhance,
             colors=np.tile(np.array([[255, 50, 0]], np.uint8), (len(enhance), 1)),
-            point_size=diag * 0.0012)
+            point_size=enhance_point_size)
 
     # Existing cameras (green)
     ext = predictions.get("extrinsic")
@@ -92,6 +94,16 @@ def visualize_nfn_with_viser(
     def _update_cloud(_):
         p, c = filtered(thr.value)
         cloud.points, cloud.colors = p, c
+
+    # Point-size control (multiplier of the scene-relative default).
+    point_size = server.gui.add_slider("Point size (x)", min=0.1, max=5.0, step=0.1,
+                                       initial_value=1.0)
+
+    @point_size.on_update
+    def _update_point_size(_):
+        cloud.point_size = base_point_size * point_size.value
+        if enhance_handle is not None:
+            enhance_handle.point_size = enhance_point_size * point_size.value
 
     if enhance_handle is not None:
         toggle = server.gui.add_checkbox("Show to-improve points", True)

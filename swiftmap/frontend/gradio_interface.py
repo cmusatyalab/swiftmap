@@ -61,7 +61,7 @@ class MappingGradioInterface:
 
         # NFN (Next Flight Navigation) Viser server state
         self.nfn_server = None
-        self.nfn_port = 8080
+        self.nfn_port = 7867
         
         # Statistics tracking
         self.stats_history = []
@@ -192,11 +192,22 @@ class MappingGradioInterface:
                                 label="Filter Dynamic Objects"
                             )
 
+                            max_keyframes_input = gr.Number(
+                                value=70,
+                                label="Max Keyframes (cap, 0 = no cap)",
+                                precision=0,
+                                minimum=0
+                            )
+
                             # GPS alignment: upload a GPS trace CSV and align the
                             # reconstruction so NFN viewpoints get real lat/lon/alt.
                             gps_csv_input = gr.File(
                                 label="GPS Traces CSV (latitude, longitude, altitude)",
                                 file_types=[".csv"]
+                            )
+                            gps_synced_checkbox = gr.Checkbox(
+                                value=False,
+                                label="GPS synced 1:1 with keyframes (skip ICP, exact pairs)"
                             )
                             calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment", variant="secondary")
                             gps_status = gr.Textbox(
@@ -264,7 +275,7 @@ class MappingGradioInterface:
             # Processing Controls
             process_keyframes_btn.click(
                 fn=self._process_keyframes,
-                inputs=[conf_threshold_slider, mask_sky_checkbox, mask_dynamic_checkbox],
+                inputs=[conf_threshold_slider, mask_sky_checkbox, mask_dynamic_checkbox, max_keyframes_input],
                 outputs=[model_viewer, processing_status, processing_log, keyframe_count]
             )
             
@@ -276,7 +287,7 @@ class MappingGradioInterface:
 
             calibrate_gps_btn.click(
                 fn=self._calibrate_gps,
-                inputs=[gps_csv_input],
+                inputs=[gps_csv_input, gps_synced_checkbox],
                 outputs=[gps_status, processing_log]
             )
 
@@ -386,20 +397,23 @@ class MappingGradioInterface:
         except Exception as e:
             return 0, f"Error clearing keyframes: {str(e)}"
     
-    def _process_keyframes(self, conf_threshold: float, mask_sky: bool, mask_dynamic: bool) -> Tuple[str, str, str, int]:
+    def _process_keyframes(self, conf_threshold: float, mask_sky: bool, mask_dynamic: bool,
+                           max_keyframes: int = 70) -> Tuple[str, str, str, int]:
         """
         Process collected keyframes with VGGT.
-        
+
         Args:
             conf_threshold: Confidence threshold percentage
             mask_sky: Enable sky filtering
             mask_dynamic: Enable dynamic object filtering
-            
+            max_keyframes: cap on keyframes sent to VGGT (0 = no cap)
+
         Returns:
             Tuple of (model_file, processing_status, log_message, keyframe_count)
         """
         try:
             self.processing_active = True
+            self.session.max_keyframes = int(max_keyframes)
 
             processing_params = {
                 "conf_threshold": float(conf_threshold),
@@ -456,22 +470,28 @@ class MappingGradioInterface:
         except Exception as e:
             return None, f"Error generating confidence map: {str(e)}"
 
-    def _calibrate_gps(self, gps_file) -> Tuple[str, str]:
-        """Align the reconstruction to a GPS trace CSV (so NFN viewpoints get GPS)."""
+    def _calibrate_gps(self, gps_file, synced: bool = False) -> Tuple[str, str]:
+        """Align the reconstruction to a GPS trace CSV (so NFN viewpoints get GPS).
+
+        synced=True: GPS rows correspond 1:1 to keyframes -> direct Umeyama, no ICP.
+        synced=False: unsynced trajectory -> ICP refinement.
+        """
         try:
             if gps_file is None:
                 return "Not aligned", "GPS: upload a GPS trace CSV first."
             # gr.File gives a filepath string (or an object with .name).
             gps_path = getattr(gps_file, "name", gps_file)
 
-            cfg = self.session.calibrate_gps(gps_path)
+            cfg = self.session.calibrate_gps(gps_path, use_icp=not synced)
             if "error" in cfg:
                 return "Not aligned", f"GPS: {cfg['error']}"
 
-            status = (f"✅ Aligned — scale {cfg['scale']:.3f}, "
+            mode = "exact pairs, no ICP" if synced else "trajectory ICP"
+            status = (f"✅ Aligned ({mode}) — scale {cfg['scale']:.3f}, "
                       f"RMSE {cfg['rmse']:.2f} m ({cfg['num_points']} pts)")
-            log = (f"GPS alignment: scale={cfg['scale']:.4f}, RMSE={cfg['rmse']:.3f} m "
-                   f"(init {cfg['init_rmse']:.3f} m, {cfg['num_points']} pts).\n"
+            log = (f"GPS alignment [{mode}]: scale={cfg['scale']:.4f}, "
+                   f"RMSE={cfg['rmse']:.3f} m (init {cfg['init_rmse']:.3f} m, "
+                   f"{cfg['num_points']} pts).\n"
                    f"Origin ({cfg['lat0']:.6f}, {cfg['lon0']:.6f}, {cfg['alt0']:.1f}).\n"
                    f"NFN viewpoints will now include GPS coordinates.")
             return status, log
@@ -579,6 +599,7 @@ class MappingGradioInterface:
                 msgs.append(f"NFN viewpoints → {nfn_path}")
                 if self.session.gps_transform is not None:
                     msgs.append("GPS transform → transform.json")
+                    msgs.append("Targets KML (Google My Maps) → next_flight_viewpoints.kml")
 
             return "\n".join(msgs)
 

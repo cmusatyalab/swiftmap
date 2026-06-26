@@ -57,6 +57,11 @@ class MappingSession:
         # Latest NFN plan (set by plan(); used by export).
         self.latest_plan = None
 
+        # Second-round cap: after optical-flow selection, the keyframe set passed to
+        # VGGT is capped to this many, keeping the highest-priority (highest-disparity)
+        # ones. 0 disables the cap. Keeps the VGGT batch within memory.
+        self.max_keyframes = 70
+
         # Transport is created on start() (its port is chosen then).
         self.tcp_server: Optional[MappingTCPServer] = None
         self.port: Optional[int] = None
@@ -172,12 +177,35 @@ class MappingSession:
 
     # =============================================================== mapping stage
     def reconstruct(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Run VGGT reconstruction on the collected keyframes."""
-        paths = self.get_keyframe_paths()
+        """Run VGGT reconstruction on the collected keyframes (capped if needed)."""
+        paths = self._capped_keyframe_paths()
         if not paths:
             return {"success": False, "error": "No keyframes collected yet",
                     "keyframe_count": 0}
         return self.mapper.process_keyframes(paths, params)
+
+    def _capped_keyframe_paths(self) -> List[str]:
+        """Keyframe paths after the second-round cap.
+
+        If more than ``max_keyframes`` were collected, keep the highest-priority
+        (highest-disparity) ones; falls back to even subsampling when priorities
+        aren't usable (e.g. keep-all). Returns paths in capture order.
+        """
+        paths = self.get_keyframe_paths()
+        cap = self.max_keyframes
+        if not cap or len(paths) <= cap:
+            return paths
+
+        values = list(self.selector.keyframe_values)
+        if len(values) == len(paths) and len(set(values)) > 1:
+            # Priority: keep the top-`cap` by disparity, then restore capture order.
+            order = sorted(range(len(paths)), key=lambda i: values[i], reverse=True)
+            keep = sorted(order[:cap])
+        else:
+            # No usable priority -> evenly spaced across the sequence.
+            keep = sorted(set(np.linspace(0, len(paths) - 1, cap).round().astype(int).tolist()))
+        print(f"Keyframe cap: {len(paths)} -> {len(keep)} (max_keyframes={cap})")
+        return [paths[i] for i in keep]
 
     def get_latest_results(self) -> Dict[str, Any]:
         """Latest reconstruction results (or {'error': ...} if none yet)."""
@@ -235,14 +263,17 @@ class MappingSession:
 
         Args:
             gps_lla: GPS trajectory as an (M, 3) array of [lat, lon, alt], or a path
-                     to a CSV with latitude/longitude/altitude columns. Capture order;
-                     count need not match the keyframes (trajectory alignment via ICP).
-            use_icp: refine the initial Umeyama fit with ICP.
+                     to a CSV with latitude/longitude/altitude columns, in capture order.
+            use_icp: if True, treat the GPS as an *unsynced* trajectory and refine the
+                     fit with ICP (count may differ from the keyframes). If False, treat
+                     the GPS as **exactly matched 1:1 with the keyframes** (row i = GPS of
+                     keyframe i) and do a single direct Umeyama fit -- this requires the
+                     GPS count to equal the keyframe count.
 
         Returns the transform config (scale, rotation, translation, origin, rmse),
-        or {'error': ...} if there's no reconstruction to align.
+        or {'error': ...} on failure.
         """
-        from swiftmap.core import geo
+        from swiftmap.core.geo_transform import geo
 
         preds = self.mapper.latest_predictions
         if not preds or "camera_positions" not in preds:
@@ -252,13 +283,23 @@ class MappingSession:
             gps_lla = geo.load_gps_csv(gps_lla)
 
         slam_xyz = np.asarray(preds["camera_positions"]).reshape(-1, 3)
+        gps_arr = np.asarray(gps_lla, dtype=float).reshape(-1, 3)
+
+        # Synced (no-ICP) mode requires a 1:1 GPS-per-keyframe correspondence.
+        if not use_icp and len(gps_arr) != len(slam_xyz):
+            return {"error": (f"Synced mode needs one GPS row per keyframe, but got "
+                              f"{len(slam_xyz)} keyframes and {len(gps_arr)} GPS rows. "
+                              f"Use 'Keep all frames' + a per-frame GPS CSV, or uncheck "
+                              f"'GPS synced 1:1' to use ICP.")}
+
         try:
             self.gps_transform, cfg = geo.GpsTransform.from_calibration(
-                slam_xyz, gps_lla, use_icp=use_icp)
+                slam_xyz, gps_arr, use_icp=use_icp)
         except Exception as e:
             return {"error": f"GPS alignment failed: {e}"}
-        print(f"GPS aligned: scale={cfg['scale']:.3f}, RMSE={cfg['rmse']:.3f} m "
-              f"({cfg['num_points']} points)")
+        cfg["mode"] = "icp" if use_icp else "synced"
+        print(f"GPS aligned ({cfg['mode']}): scale={cfg['scale']:.3f}, "
+              f"RMSE={cfg['rmse']:.3f} m ({cfg['num_points']} points)")
         return cfg
 
     def to_gps(self, points):
@@ -316,6 +357,10 @@ class MappingSession:
         if self.gps_transform is not None:
             with open(os.path.join(target_dir, "transform.json"), "w") as f:
                 json.dump(self.gps_transform.cfg, f, indent=2)
+            # KML of the target (ground) GPS, ready to import into Google My Maps.
+            from swiftmap.core.nfn import kml
+            kml.write_kml(viewpoints, os.path.join(target_dir, "next_flight_viewpoints.kml"),
+                          gps_key="target_gps", doc_name="SwiftMap NFN Targets")
 
         return path
 
