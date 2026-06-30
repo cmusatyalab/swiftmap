@@ -209,7 +209,10 @@ class MappingGradioInterface:
                                 value=False,
                                 label="GPS synced 1:1 with keyframes (skip ICP, exact pairs)"
                             )
-                            calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment", variant="secondary")
+                            calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment (CSV)", variant="secondary")
+                            calibrate_gps_stream_btn = gr.Button(
+                                "🛰️ Calibrate GPS from Stream (paired frames+GPS, no ICP)",
+                                variant="secondary")
                             gps_status = gr.Textbox(
                                 label="GPS Alignment",
                                 value="Not aligned",
@@ -288,6 +291,11 @@ class MappingGradioInterface:
             calibrate_gps_btn.click(
                 fn=self._calibrate_gps,
                 inputs=[gps_csv_input, gps_synced_checkbox],
+                outputs=[gps_status, processing_log]
+            )
+
+            calibrate_gps_stream_btn.click(
+                fn=self._calibrate_gps_stream,
                 outputs=[gps_status, processing_log]
             )
 
@@ -492,6 +500,22 @@ class MappingGradioInterface:
             log = (f"GPS alignment [{mode}]: scale={cfg['scale']:.4f}, "
                    f"RMSE={cfg['rmse']:.3f} m (init {cfg['init_rmse']:.3f} m, "
                    f"{cfg['num_points']} pts).\n"
+                   f"Origin ({cfg['lat0']:.6f}, {cfg['lon0']:.6f}, {cfg['alt0']:.1f}).\n"
+                   f"NFN viewpoints will now include GPS coordinates.")
+            return status, log
+        except Exception as e:
+            return "Not aligned", f"GPS calibration error: {e}"
+
+    def _calibrate_gps_stream(self) -> Tuple[str, str]:
+        """Align using the GPS that streamed paired with each keyframe (no CSV, no ICP)."""
+        try:
+            cfg = self.session.calibrate_gps_from_stream()
+            if "error" in cfg:
+                return "Not aligned", f"GPS: {cfg['error']}"
+            status = (f"✅ Aligned (stream pairs) — scale {cfg['scale']:.3f}, "
+                      f"RMSE {cfg['rmse']:.2f} m ({cfg['num_points']} pts)")
+            log = (f"GPS alignment [stream-synced, no ICP]: scale={cfg['scale']:.4f}, "
+                   f"RMSE={cfg['rmse']:.3f} m ({cfg['num_points']} paired keyframes).\n"
                    f"Origin ({cfg['lat0']:.6f}, {cfg['lon0']:.6f}, {cfg['alt0']:.1f}).\n"
                    f"NFN viewpoints will now include GPS coordinates.")
             return status, log

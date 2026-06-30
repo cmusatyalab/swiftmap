@@ -125,27 +125,48 @@ class MappingTCPServer:
             # Decode image from bytes
             nparr = np.frombuffer(received_data, np.uint8)
             image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
+
             if image is None:
                 print("Failed to decode image from bytes")
                 return None
-            
+
+            # Receive the paired per-frame GPS (3 float64 big-endian: lat, lon, alt;
+            # NaN values mean "no GPS for this frame").
+            gps_bytes = self._recv_exact(client_socket, 24)
+            if gps_bytes is None:
+                print("Connection broken while receiving GPS")
+                return None
+            lat, lon, alt = struct.unpack('!3d', gps_bytes)
+            gps = None if (lat != lat or lon != lon) else (lat, lon, alt)  # NaN -> None
+
             # Create metadata
             timestamp = datetime.now()
             metadata = {
                 "timestamp": timestamp,
                 "image_size": image_size,
                 "image_shape": image.shape,
-                "frame_id": self.total_frames_received + 1
+                "frame_id": self.total_frames_received + 1,
+                "gps": gps,
             }
-            
-            print(f"Successfully received image: {image.shape}")
+
+            print(f"Successfully received image: {image.shape}"
+                  + (f" gps=({lat:.6f},{lon:.6f},{alt:.1f})" if gps else " (no gps)"))
             return image, metadata
-            
+
         except Exception as e:
             print(f"Error receiving image: {e}")
             return None
-    
+
+    def _recv_exact(self, sock, n: int):
+        """Receive exactly n bytes, or None if the peer closes."""
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
     def send_status_response(self, client_socket, status_code: str, message: str = "") -> bool:
         """
         Send status response back to client.

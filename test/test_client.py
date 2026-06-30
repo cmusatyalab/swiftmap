@@ -96,19 +96,20 @@ class MappingTestClient:
         self.is_connected = False
         print("🔌 Disconnected from server")
     
-    def send_image(self, image_path: str) -> Optional[Tuple[bool, str]]:
+    def send_image(self, image_path: str, gps=None) -> Optional[Tuple[bool, str]]:
         """
-        Send image to server and receive response.
-        
+        Send image (+ paired GPS) to server and receive response.
+
         Args:
             image_path: Path to image file
-            
+            gps: optional (lat, lon, alt) paired with this frame; None -> sent as NaN.
+
         Returns:
             Tuple of (is_keyframe, status_message) or None if failed
         """
         if not self.is_connected:
             return None
-        
+
         try:
             # Read and encode image
             image = cv2.imread(image_path)
@@ -116,20 +117,24 @@ class MappingTestClient:
                 print(f"❌ Failed to read image: {image_path}")
                 self.stats["errors"] += 1
                 return None
-            
+
             # Encode image as JPEG
             _, encoded_image = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 90])
             image_bytes = encoded_image.tobytes()
-            
+
             # Send image size first (4 bytes, big-endian)
             size_data = struct.pack('!I', len(image_bytes))
             self.socket.sendall(size_data)
-            
+
             # Send image data
             self.socket.sendall(image_bytes)
-            
+
+            # Send the paired GPS (3 float64 big-endian: lat, lon, alt; NaN = none)
+            lat, lon, alt = gps if gps is not None else (float('nan'),) * 3
+            self.socket.sendall(struct.pack('!3d', lat, lon, alt))
+
             self.stats["images_sent"] += 1
-            self.stats["total_bytes_sent"] += len(image_bytes) + 4
+            self.stats["total_bytes_sent"] += len(image_bytes) + 4 + 24
             
             # Receive response (3 doubles = 24 bytes)
             response_data = self.socket.recv(24)
@@ -171,8 +176,8 @@ class MappingTestClient:
             self.stats["errors"] += 1
             return None
     
-    def send_image_directory(self, image_dir: str, delay: float = 0.5, 
-                           max_images: Optional[int] = None) -> bool:
+    def send_image_directory(self, image_dir: str, delay: float = 0.5,
+                           max_images: Optional[int] = None, gps_csv: Optional[str] = None) -> bool:
         """
         Send all images from directory to server.
         
@@ -204,18 +209,33 @@ class MappingTestClient:
         
         if max_images:
             image_paths = image_paths[:max_images]
-        
+
+        # Optional paired GPS, one row (lat,lon,alt) per image in sorted order.
+        gps_rows = None
+        if gps_csv:
+            import csv
+            gps_rows = []
+            with open(gps_csv, newline="") as f:
+                for r in csv.DictReader(f):
+                    cols = {c.lower(): c for c in r}
+                    gps_rows.append((float(r[cols["latitude"]]), float(r[cols["longitude"]]),
+                                     float(r[cols.get("altitude", cols.get("height"))])))
+            print(f"🛰️  Loaded {len(gps_rows)} GPS rows from {gps_csv}")
+            if len(gps_rows) != len(image_paths):
+                print(f"   ⚠️ gps rows ({len(gps_rows)}) != images ({len(image_paths)}); pairing by index")
+
         print(f"📁 Found {len(image_paths)} images in {image_dir}")
         print(f"⏱️  Sending with {delay}s delay between images")
         print(f"🎯 Target server: {self.host}:{self.port}")
         print("")
-        
+
         try:
             for i, image_path in enumerate(image_paths):
                 print(f"📷 [{i+1}/{len(image_paths)}] Sending: {os.path.basename(image_path)}")
-                
+
+                gps = gps_rows[i] if (gps_rows and i < len(gps_rows)) else None
                 start_time = time.time()
-                result = self.send_image(image_path)
+                result = self.send_image(image_path, gps=gps)
                 send_time = time.time() - start_time
                 
                 if result:
@@ -382,7 +402,9 @@ Examples:
                        help="Delay between images in seconds (default: 0.1)")
     parser.add_argument("--max-images", type=int,
                        help="Maximum number of images to send")
-    
+    parser.add_argument("--gps-csv", type=str,
+                       help="CSV (latitude,longitude,altitude) paired 1:1 with the sorted images")
+
     # Mode settings
     parser.add_argument("--interactive", action="store_true",
                        help="Run in interactive mode")
@@ -425,7 +447,8 @@ Examples:
             success = client.send_image_directory(
                 args.image_dir,
                 delay=args.delay,
-                max_images=args.max_images
+                max_images=args.max_images,
+                gps_csv=args.gps_csv
             )
             
             # Print final statistics

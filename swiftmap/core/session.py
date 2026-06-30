@@ -71,6 +71,13 @@ class MappingSession:
         self._paths_lock = threading.Lock()
         self._keyframe_count = 0
 
+        # Per-keyframe GPS [lat, lon, alt] paired with each selected keyframe (in
+        # selection order; None when a frame arrived without GPS). Lets us calibrate
+        # directly from the matched stream pairs (no CSV, no ICP).
+        self._keyframe_gps: List = []
+        # GPS for the capped keyframes actually sent to VGGT (set by reconstruct()).
+        self._reconstructed_gps: List = []
+
         self.is_running = False
         self.server_thread = None
         self.start_time = None
@@ -112,6 +119,8 @@ class MappingSession:
         self._keyframe_count = 0
         with self._paths_lock:
             self._keyframe_paths.clear()
+        self._keyframe_gps.clear()
+        self._reconstructed_gps.clear()
         self.start_time = datetime.now()
 
         self.server_thread = threading.Thread(target=self.tcp_server.start_server,
@@ -136,10 +145,11 @@ class MappingSession:
         print("Mapping session stopped")
 
     def _on_frame(self, image, metadata: Dict[str, Any]) -> bool:
-        """TCP-server callback: run selection on each frame, count keyframes."""
+        """TCP-server callback: run selection, count keyframes, keep paired GPS."""
         is_keyframe = self.selector.is_keyframe(image)
         if is_keyframe:
             self._keyframe_count += 1
+            self._keyframe_gps.append(metadata.get("gps"))  # paired GPS (or None)
         return is_keyframe
 
     def _drain(self):
@@ -171,6 +181,8 @@ class MappingSession:
         with self._paths_lock:
             self._keyframe_paths.clear()
         self._keyframe_count = 0
+        self._keyframe_gps.clear()
+        self._reconstructed_gps.clear()
 
     def configure_disparity_threshold(self, min_disparity: float):
         self.selector.configure_disparity_threshold(min_disparity)
@@ -192,19 +204,23 @@ class MappingSession:
         aren't usable (e.g. keep-all). Returns paths in capture order.
         """
         paths = self.get_keyframe_paths()
+        gps = list(self._keyframe_gps)
         cap = self.max_keyframes
         if not cap or len(paths) <= cap:
-            return paths
-
-        values = list(self.selector.keyframe_values)
-        if len(values) == len(paths) and len(set(values)) > 1:
-            # Priority: keep the top-`cap` by disparity, then restore capture order.
-            order = sorted(range(len(paths)), key=lambda i: values[i], reverse=True)
-            keep = sorted(order[:cap])
+            keep = list(range(len(paths)))
         else:
-            # No usable priority -> evenly spaced across the sequence.
-            keep = sorted(set(np.linspace(0, len(paths) - 1, cap).round().astype(int).tolist()))
-        print(f"Keyframe cap: {len(paths)} -> {len(keep)} (max_keyframes={cap})")
+            values = list(self.selector.keyframe_values)
+            if len(values) == len(paths) and len(set(values)) > 1:
+                # Priority: keep the top-`cap` by disparity, then restore capture order.
+                order = sorted(range(len(paths)), key=lambda i: values[i], reverse=True)
+                keep = sorted(order[:cap])
+            else:
+                # No usable priority -> evenly spaced across the sequence.
+                keep = sorted(set(np.linspace(0, len(paths) - 1, cap).round().astype(int).tolist()))
+            print(f"Keyframe cap: {len(paths)} -> {len(keep)} (max_keyframes={cap})")
+
+        # Carry the paired GPS for exactly the kept keyframes (same order as paths).
+        self._reconstructed_gps = [gps[i] if i < len(gps) else None for i in keep]
         return [paths[i] for i in keep]
 
     def get_latest_results(self) -> Dict[str, Any]:
@@ -299,6 +315,42 @@ class MappingSession:
             return {"error": f"GPS alignment failed: {e}"}
         cfg["mode"] = "icp" if use_icp else "synced"
         print(f"GPS aligned ({cfg['mode']}): scale={cfg['scale']:.3f}, "
+              f"RMSE={cfg['rmse']:.3f} m ({cfg['num_points']} points)")
+        return cfg
+
+    def calibrate_gps_from_stream(self) -> Dict[str, Any]:
+        """Align using the GPS that streamed *paired* with each keyframe.
+
+        Uses the per-keyframe GPS collected during streaming (1:1 with the camera
+        poses of the last reconstruction) and does a single direct Umeyama fit --
+        no CSV upload, no ICP. Run after reconstruct().
+        """
+        from swiftmap.core.geo_transform import geo
+
+        preds = self.mapper.latest_predictions
+        if not preds or "camera_positions" not in preds:
+            return {"error": "No reconstruction with camera poses yet — process keyframes first."}
+
+        cams = np.asarray(preds["camera_positions"]).reshape(-1, 3)
+        gps = self._reconstructed_gps
+        if not gps or len(gps) != len(cams):
+            return {"error": (f"No paired stream GPS to align ({len(cams)} poses vs "
+                              f"{len(gps)} gps). Stream frames carrying GPS, then reconstruct.")}
+
+        # Keep only keyframes that actually had GPS (1:1, same order).
+        pairs = [(c, g) for c, g in zip(cams, gps) if g is not None]
+        if len(pairs) < 3:
+            return {"error": f"Only {len(pairs)} keyframes have GPS; need at least 3."}
+        slam = np.array([c for c, _ in pairs], dtype=float)
+        gps_arr = np.array([g for _, g in pairs], dtype=float)
+
+        try:
+            self.gps_transform, cfg = geo.GpsTransform.from_calibration(
+                slam, gps_arr, use_icp=False)
+        except Exception as e:
+            return {"error": f"GPS alignment failed: {e}"}
+        cfg["mode"] = "stream-synced"
+        print(f"GPS aligned (stream-synced): scale={cfg['scale']:.3f}, "
               f"RMSE={cfg['rmse']:.3f} m ({cfg['num_points']} points)")
         return cfg
 
