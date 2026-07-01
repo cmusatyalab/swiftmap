@@ -13,6 +13,118 @@ import cv2
 import os
 import requests
 
+from swiftmap.core import constants
+
+# Point-cloud filtering thresholds.
+_SKY_MASK_THRESHOLD = 0.1    # skyseg mask value above this counts as sky (zeroed)
+_BLACK_BG_SUM = 16           # drop pixels whose RGB channel sum is below this
+_WHITE_BG_LEVEL = 240        # drop pixels with every channel above this
+_CONF_EPSILON = 1e-5         # drop non-positive confidence
+_SCENE_SCALE_PERCENTILES = (5, 95)
+
+
+def _selected_frame_index(filter_by_frames):
+    """Parse an 'idx:...' frame filter into an int index, or None for 'all'."""
+    if filter_by_frames in ("all", "All"):
+        return None
+    try:
+        return int(filter_by_frames.split(":")[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _select_points_and_conf(predictions, prediction_mode):
+    """Pick (world_points, confidence) per the prediction mode. Shared by the GLB
+    and PLY export paths."""
+    if "Pointmap" in prediction_mode and "world_points" not in predictions:
+        print("Warning: world_points not found in predictions, falling back to depth-based points")
+    if "Pointmap" in prediction_mode and "world_points" in predictions:
+        pts = predictions["world_points"]
+        conf = predictions.get("world_points_conf", np.ones_like(pts[..., 0]))
+    else:
+        pts = predictions["world_points_from_depth"]
+        conf = predictions.get("depth_conf", np.ones_like(pts[..., 0]))
+    return pts, conf
+
+
+def _apply_sky_mask(conf, target_dir):
+    """Zero confidence on sky pixels (via skyseg.onnx). No-op when target_dir is
+    None. Returns the updated confidence array."""
+    if target_dir is None:
+        return conf
+    import onnxruntime
+
+    target_dir_images = os.path.join(target_dir, "images")
+    image_list = sorted(os.listdir(target_dir_images)) if os.path.isdir(target_dir_images) else []
+    os.makedirs(os.path.join(target_dir, "sky_masks"), exist_ok=True)
+
+    _, H, W = conf.shape
+
+    if not os.path.exists(constants.SKYSEG_ONNX_FILENAME):
+        print("Downloading skyseg.onnx...")
+        download_file_from_url(constants.SKYSEG_ONNX_URL, constants.SKYSEG_ONNX_FILENAME)
+
+    skyseg_session = None
+    sky_mask_list = []
+    for image_name in image_list:
+        image_filepath = os.path.join(target_dir_images, image_name)
+        mask_filepath = os.path.join(target_dir, "sky_masks", image_name)
+        if os.path.exists(mask_filepath):
+            sky_mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
+        else:
+            if skyseg_session is None:
+                skyseg_session = onnxruntime.InferenceSession(constants.SKYSEG_ONNX_FILENAME)
+            sky_mask = segment_sky(image_filepath, skyseg_session, mask_filepath)
+        if sky_mask.shape[0] != H or sky_mask.shape[1] != W:
+            sky_mask = cv2.resize(sky_mask, (W, H))
+        sky_mask_list.append(sky_mask)
+
+    sky_mask_binary = (np.array(sky_mask_list) > _SKY_MASK_THRESHOLD).astype(np.float32)
+    return conf * sky_mask_binary
+
+
+def _apply_dynamic_filter(predictions, conf, target_dir):
+    """Zero confidence on dynamic objects via the semantic filter, if available.
+    No-op when target_dir is None. Returns the updated confidence array."""
+    if target_dir is None:
+        return conf
+    try:
+        from utils.semantic_filter import filter_dynamic_objects_from_predictions
+        predictions_copy = predictions.copy()
+        predictions_copy["world_points_conf"] = conf
+        print("[Dynamic Filter] Applying semantic filtering to remove dynamic objects...")
+        filtered = filter_dynamic_objects_from_predictions(predictions_copy, target_dir)
+        return filtered["world_points_conf"]
+    except ImportError as e:
+        print(f"[Dynamic Filter] Warning: Could not import semantic filter: {e}")
+    except Exception as e:
+        print(f"[Dynamic Filter] Warning: Semantic filtering failed: {e}")
+    return conf
+
+
+def _flatten_colors(images):
+    """Flatten an (S,H,W,3) or (S,3,H,W) image batch into an (N,3) uint8 RGB array."""
+    if images.ndim == 4 and images.shape[1] == 3:   # NCHW
+        colors_rgb = np.transpose(images, (0, 2, 3, 1))
+    else:                                            # assume NHWC
+        colors_rgb = images
+    return (colors_rgb.reshape(-1, 3) * 255).astype(np.uint8)
+
+
+def _confidence_mask(conf, conf_thres, colors_rgb, mask_black_bg, mask_white_bg):
+    """Boolean keep-mask over flattened points: confidence percentile plus optional
+    black/white background rejection."""
+    conf_threshold = 0.0 if conf_thres == 0.0 else np.percentile(conf, conf_thres)
+    mask = (conf >= conf_threshold) & (conf > _CONF_EPSILON)
+    if mask_black_bg:
+        mask = mask & (colors_rgb.sum(axis=1) >= _BLACK_BG_SUM)
+    if mask_white_bg:
+        white = ((colors_rgb[:, 0] > _WHITE_BG_LEVEL) &
+                 (colors_rgb[:, 1] > _WHITE_BG_LEVEL) &
+                 (colors_rgb[:, 2] > _WHITE_BG_LEVEL))
+        mask = mask & ~white
+    return mask
+
 
 def predictions_to_glb(
     predictions,
@@ -53,109 +165,20 @@ def predictions_to_glb(
     """
     if not isinstance(predictions, dict):
         raise ValueError("predictions must be a dictionary")
-
     if conf_thres is None:
         conf_thres = 10.0
 
     print("Building GLB scene")
-    selected_frame_idx = None
-    if filter_by_frames != "all" and filter_by_frames != "All":
-        try:
-            # Extract the index part before the colon
-            selected_frame_idx = int(filter_by_frames.split(":")[0])
-        except (ValueError, IndexError):
-            pass
+    selected_frame_idx = _selected_frame_index(filter_by_frames)
 
-    if "Pointmap" in prediction_mode:
-        print("Using Pointmap Branch")
-        if "world_points" in predictions:
-            pred_world_points = predictions["world_points"]  # No batch dimension to remove
-            pred_world_points_conf = predictions.get("world_points_conf", np.ones_like(pred_world_points[..., 0]))
-        else:
-            print("Warning: world_points not found in predictions, falling back to depth-based points")
-            pred_world_points = predictions["world_points_from_depth"]
-            pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
-    else:
-        print("Using Depthmap and Camera Branch")
-        pred_world_points = predictions["world_points_from_depth"]
-        pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
-
-    # Get images from predictions
+    pred_world_points, pred_world_points_conf = _select_points_and_conf(predictions, prediction_mode)
     images = predictions["images"]
-    # Use extrinsic matrices instead of pred_extrinsic_list
     camera_matrices = predictions["extrinsic"]
 
     if mask_sky:
-        if target_dir is not None:
-            import onnxruntime
-
-            skyseg_session = None
-            target_dir_images = target_dir + "/images"
-            image_list = sorted(os.listdir(target_dir_images))
-            sky_mask_list = []
-
-            # Get the shape of pred_world_points_conf to match
-            S, H, W = (
-                pred_world_points_conf.shape
-                if hasattr(pred_world_points_conf, "shape")
-                else (len(images), images.shape[1], images.shape[2])
-            )
-
-            # Download skyseg.onnx if it doesn't exist
-            if not os.path.exists("skyseg.onnx"):
-                print("Downloading skyseg.onnx...")
-                download_file_from_url(
-                    "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx", "skyseg.onnx"
-                )
-
-            for i, image_name in enumerate(image_list):
-                image_filepath = os.path.join(target_dir_images, image_name)
-                mask_filepath = os.path.join(target_dir, "sky_masks", image_name)
-
-                # Check if mask already exists
-                if os.path.exists(mask_filepath):
-                    # Load existing mask
-                    sky_mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
-                else:
-                    # Generate new mask
-                    if skyseg_session is None:
-                        skyseg_session = onnxruntime.InferenceSession("skyseg.onnx")
-                    sky_mask = segment_sky(image_filepath, skyseg_session, mask_filepath)
-
-                # Resize mask to match H×W if needed
-                if sky_mask.shape[0] != H or sky_mask.shape[1] != W:
-                    sky_mask = cv2.resize(sky_mask, (W, H))
-
-                sky_mask_list.append(sky_mask)
-
-            # Convert list to numpy array with shape S×H×W
-            sky_mask_array = np.array(sky_mask_list)
-
-            # Apply sky mask to confidence scores
-            sky_mask_binary = (sky_mask_array > 0.1).astype(np.float32)
-            pred_world_points_conf = pred_world_points_conf * sky_mask_binary
-
-    # Apply semantic filtering to remove dynamic objects (cars, people, trees, etc.)
-    if mask_dynamic and target_dir is not None:
-        try:
-            from utils.semantic_filter import filter_dynamic_objects_from_predictions
-            
-            # Apply semantic filtering to predictions
-            predictions_copy = predictions.copy()
-            predictions_copy["world_points_conf"] = pred_world_points_conf
-            
-            print("[Dynamic Filter] Applying semantic filtering to remove dynamic objects...")
-            filtered_predictions = filter_dynamic_objects_from_predictions(
-                predictions_copy, target_dir
-            )
-            
-            # Update confidence scores with filtered values
-            pred_world_points_conf = filtered_predictions["world_points_conf"]
-            
-        except ImportError as e:
-            print(f"[Dynamic Filter] Warning: Could not import semantic filter: {e}")
-        except Exception as e:
-            print(f"[Dynamic Filter] Warning: Semantic filtering failed: {e}")
+        pred_world_points_conf = _apply_sky_mask(pred_world_points_conf, target_dir)
+    if mask_dynamic:
+        pred_world_points_conf = _apply_dynamic_filter(predictions, pred_world_points_conf, target_dir)
 
     if selected_frame_idx is not None:
         pred_world_points = pred_world_points[selected_frame_idx][None]
@@ -164,32 +187,9 @@ def predictions_to_glb(
         camera_matrices = camera_matrices[selected_frame_idx][None]
 
     vertices_3d = pred_world_points.reshape(-1, 3)
-    # Handle different image formats - check if images need transposing
-    if images.ndim == 4 and images.shape[1] == 3:  # NCHW format
-        colors_rgb = np.transpose(images, (0, 2, 3, 1))
-    else:  # Assume already in NHWC format
-        colors_rgb = images
-    colors_rgb = (colors_rgb.reshape(-1, 3) * 255).astype(np.uint8)
-
+    colors_rgb = _flatten_colors(images)
     conf = pred_world_points_conf.reshape(-1)
-    # Convert percentage threshold to actual confidence value
-    if conf_thres == 0.0:
-        conf_threshold = 0.0
-    else:
-        conf_threshold = np.percentile(conf, conf_thres)
-
-    conf_mask = (conf >= conf_threshold) & (conf > 1e-5)
-
-    if mask_black_bg:
-        black_bg_mask = colors_rgb.sum(axis=1) >= 16
-        conf_mask = conf_mask & black_bg_mask
-
-    if mask_white_bg:
-        # Filter out white background pixels (RGB values close to white)
-        # Consider pixels white if all RGB values are above 240
-        white_bg_mask = ~((colors_rgb[:, 0] > 240) & (colors_rgb[:, 1] > 240) & (colors_rgb[:, 2] > 240))
-        conf_mask = conf_mask & white_bg_mask
-
+    conf_mask = _confidence_mask(conf, conf_thres, colors_rgb, mask_black_bg, mask_white_bg)
     vertices_3d = vertices_3d[conf_mask]
     colors_rgb = colors_rgb[conf_mask]
 
@@ -198,11 +198,8 @@ def predictions_to_glb(
         colors_rgb = np.array([[255, 255, 255]])
         scene_scale = 1
     else:
-        # Calculate the 5th and 95th percentiles along each axis
-        lower_percentile = np.percentile(vertices_3d, 5, axis=0)
-        upper_percentile = np.percentile(vertices_3d, 95, axis=0)
-
-        # Calculate the diagonal length of the percentile bounding box
+        lower_percentile = np.percentile(vertices_3d, _SCENE_SCALE_PERCENTILES[0], axis=0)
+        upper_percentile = np.percentile(vertices_3d, _SCENE_SCALE_PERCENTILES[1], axis=0)
         scene_scale = np.linalg.norm(upper_percentile - lower_percentile)
 
     colormap = matplotlib.colormaps.get_cmap("gist_rainbow")
@@ -501,113 +498,19 @@ def extract_point_cloud_data(
     """
     if not isinstance(predictions, dict):
         raise ValueError("predictions must be a dictionary")
-
     if conf_thres is None:
         conf_thres = 10.0
 
     print("Extracting point cloud data for PLY export...")
-    selected_frame_idx = None
-    if filter_by_frames != "all" and filter_by_frames != "All":
-        try:
-            # Extract the index part before the colon
-            selected_frame_idx = int(filter_by_frames.split(":")[0])
-        except (ValueError, IndexError):
-            pass
+    selected_frame_idx = _selected_frame_index(filter_by_frames)
 
-    if "Pointmap" in prediction_mode:
-        print("Using Pointmap Branch for PLY export")
-        if "world_points" in predictions:
-            pred_world_points = predictions["world_points"]  # No batch dimension to remove
-            pred_world_points_conf = predictions.get("world_points_conf", np.ones_like(pred_world_points[..., 0]))
-        else:
-            print("Warning: world_points not found in predictions, falling back to depth-based points")
-            pred_world_points = predictions["world_points_from_depth"]
-            pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
-    else:
-        print("Using Depthmap and Camera Branch for PLY export")
-        pred_world_points = predictions["world_points_from_depth"]
-        pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
-
-    # Get images from predictions
+    pred_world_points, pred_world_points_conf = _select_points_and_conf(predictions, prediction_mode)
     images = predictions["images"]
 
-    # Apply sky mask if requested (same logic as in predictions_to_glb)
     if mask_sky:
-        if target_dir is not None:
-            print("Applying sky mask for PLY export...")
-            # Same sky masking logic as in the original function
-            import onnxruntime
-            skyseg_session = None
-            sky_mask_list = []
-            
-            target_dir_images = os.path.join(target_dir, "images")
-            image_list = sorted(os.listdir(target_dir_images)) if os.path.isdir(target_dir_images) else []
-            
-            if not os.path.exists(os.path.join(target_dir, "sky_masks")):
-                os.makedirs(os.path.join(target_dir, "sky_masks"))
-
-            # Get dimensions
-            H, W = (
-                pred_world_points.shape[1], pred_world_points.shape[2]
-                if len(pred_world_points.shape) == 4
-                else (len(images), images.shape[1], images.shape[2])
-            )
-
-            # Download skyseg.onnx if it doesn't exist
-            if not os.path.exists("skyseg.onnx"):
-                print("Downloading skyseg.onnx...")
-                download_file_from_url(
-                    "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx", "skyseg.onnx"
-                )
-
-            for i, image_name in enumerate(image_list):
-                image_filepath = os.path.join(target_dir_images, image_name)
-                mask_filepath = os.path.join(target_dir, "sky_masks", image_name)
-
-                # Check if mask already exists
-                if os.path.exists(mask_filepath):
-                    # Load existing mask
-                    sky_mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
-                else:
-                    # Generate new mask
-                    if skyseg_session is None:
-                        skyseg_session = onnxruntime.InferenceSession("skyseg.onnx")
-                    sky_mask = segment_sky(image_filepath, skyseg_session, mask_filepath)
-
-                # Resize mask to match H×W if needed
-                if sky_mask.shape[0] != H or sky_mask.shape[1] != W:
-                    sky_mask = cv2.resize(sky_mask, (W, H))
-
-                sky_mask_list.append(sky_mask)
-
-            # Convert list to numpy array with shape S×H×W
-            sky_mask_array = np.array(sky_mask_list)
-
-            # Apply sky mask to confidence scores
-            sky_mask_binary = (sky_mask_array > 0.1).astype(np.float32)
-            pred_world_points_conf = pred_world_points_conf * sky_mask_binary
-
-    # Apply semantic filtering to remove dynamic objects (cars, people, trees, etc.)
-    if mask_dynamic and target_dir is not None:
-        try:
-            from utils.semantic_filter import filter_dynamic_objects_from_predictions
-            
-            # Apply semantic filtering to predictions
-            predictions_copy = predictions.copy()
-            predictions_copy["world_points_conf"] = pred_world_points_conf
-            
-            print("[Dynamic Filter] Applying semantic filtering to remove dynamic objects...")
-            filtered_predictions = filter_dynamic_objects_from_predictions(
-                predictions_copy, target_dir
-            )
-            
-            # Update confidence scores with filtered values
-            pred_world_points_conf = filtered_predictions["world_points_conf"]
-            
-        except ImportError as e:
-            print(f"[Dynamic Filter] Warning: Could not import semantic filter: {e}")
-        except Exception as e:
-            print(f"[Dynamic Filter] Warning: Semantic filtering failed: {e}")
+        pred_world_points_conf = _apply_sky_mask(pred_world_points_conf, target_dir)
+    if mask_dynamic:
+        pred_world_points_conf = _apply_dynamic_filter(predictions, pred_world_points_conf, target_dir)
 
     if selected_frame_idx is not None:
         pred_world_points = pred_world_points[selected_frame_idx][None]
@@ -615,32 +518,9 @@ def extract_point_cloud_data(
         images = images[selected_frame_idx][None]
 
     vertices_3d = pred_world_points.reshape(-1, 3)
-    # Handle different image formats - check if images need transposing
-    if images.ndim == 4 and images.shape[1] == 3:  # NCHW format
-        colors_rgb = np.transpose(images, (0, 2, 3, 1))
-    else:  # Assume already in NHWC format
-        colors_rgb = images
-    colors_rgb = (colors_rgb.reshape(-1, 3) * 255).astype(np.uint8)
-
+    colors_rgb = _flatten_colors(images)
     conf = pred_world_points_conf.reshape(-1)
-    # Convert percentage threshold to actual confidence value
-    if conf_thres == 0.0:
-        conf_threshold = 0.0
-    else:
-        conf_threshold = np.percentile(conf, conf_thres)
-
-    conf_mask = (conf >= conf_threshold) & (conf > 1e-5)
-
-    if mask_black_bg:
-        black_bg_mask = colors_rgb.sum(axis=1) >= 16
-        conf_mask = conf_mask & black_bg_mask
-
-    if mask_white_bg:
-        # Filter out white background pixels (RGB values close to white)
-        # Consider pixels white if all RGB values are above 240
-        white_bg_mask = ~((colors_rgb[:, 0] > 240) & (colors_rgb[:, 1] > 240) & (colors_rgb[:, 2] > 240))
-        conf_mask = conf_mask & white_bg_mask
-
+    conf_mask = _confidence_mask(conf, conf_thres, colors_rgb, mask_black_bg, mask_white_bg)
     vertices_3d = vertices_3d[conf_mask]
     colors_rgb = colors_rgb[conf_mask]
 

@@ -38,8 +38,9 @@ if vggt_root not in sys.path:
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from vggt.utils.geometry import unproject_depth_map_to_point_map
-from swiftmap.core.vggt_mapper.scene_export import predictions_to_glb, export_point_cloud_to_ply
+from swiftmap.core import constants
+from swiftmap.core.vggt_mapper.scene_export import (
+    predictions_to_glb, export_point_cloud_to_ply, save_point_cloud_ply)
 
 # Try to import confidence mapping utilities
 try:
@@ -69,7 +70,7 @@ class VGGTMapper:
         self.model = None
         self.is_initialized = False
         
-        # Default processing parameters (matching TODO requirements)
+        # Default processing parameters
         self.default_params = {
             "mask_sky": True,           # Sky filtering enabled by default
             "mask_dynamic": False,      # Dynamic object filtering disabled
@@ -101,8 +102,8 @@ class VGGTMapper:
             
             # Load VGGT model
             self.model = VGGT()
-            _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-            self.model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+            self.model.load_state_dict(
+                torch.hub.load_state_dict_from_url(constants.VGGT_MODEL_URL))
             self.model.eval()
             self.model = self.model.to(self.device)
             

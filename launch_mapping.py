@@ -22,6 +22,7 @@ repo_root = os.path.dirname(os.path.abspath(__file__))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
+from swiftmap.core import constants, protocol
 from swiftmap.frontend.gradio_interface import MappingGradioInterface
 
 
@@ -33,7 +34,7 @@ def print_banner():
     print("Real-time drone mapping with keyframe selection and 3D reconstruction")
     print("")
     print("Key Features:")
-    print("  • TCP image reception on port 43322")
+    print(f"  • TCP image reception on port {protocol.TCP_PORT}")
     print("  • Optical flow-based keyframe selection")
     print("  • VGGT 3D reconstruction inference")
     print("  • Dual visualization (3D model + confidence mapping)")
@@ -80,8 +81,8 @@ Examples:
     # Network settings
     parser.add_argument("--host", type=str, default="0.0.0.0",
                         help="Host address (default: 0.0.0.0)")
-    parser.add_argument("--gui-port", type=int, default=7866,
-                        help="Gradio GUI port (default: 7866)")
+    parser.add_argument("--gui-port", type=int, default=constants.GUI_PORT,
+                        help=f"Gradio GUI port (default: {constants.GUI_PORT})")
 
     args = parser.parse_args()
 

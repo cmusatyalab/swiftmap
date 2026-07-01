@@ -23,12 +23,16 @@ import os
 import sys
 import argparse
 import socket
-import struct
 import time
 import glob
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 import cv2
+
+# Make the swiftmap package importable when run as a standalone script, so the
+# wire protocol has a single source of truth (swiftmap.core.protocol).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from swiftmap.core import protocol
 
 
 class MappingTestClient:
@@ -38,7 +42,7 @@ class MappingTestClient:
     Sends images to the mapping server and receives keyframe selection responses.
     """
     
-    def __init__(self, host: str = "localhost", port: int = 43322):
+    def __init__(self, host: str = "localhost", port: int = protocol.TCP_PORT):
         """
         Initialize test client.
         
@@ -91,7 +95,7 @@ class MappingTestClient:
         if self.socket:
             try:
                 self.socket.close()
-            except:
+            except OSError:
                 pass
         self.is_connected = False
         print("🔌 Disconnected from server")
@@ -122,50 +126,34 @@ class MappingTestClient:
             _, encoded_image = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 90])
             image_bytes = encoded_image.tobytes()
 
-            # Send image size first (4 bytes, big-endian)
-            size_data = struct.pack('!I', len(image_bytes))
-            self.socket.sendall(size_data)
-
-            # Send image data
+            # Send image size header, the JPEG body, then the paired GPS.
+            self.socket.sendall(protocol.pack_size(len(image_bytes)))
             self.socket.sendall(image_bytes)
-
-            # Send the paired GPS (3 float64 big-endian: lat, lon, alt; NaN = none)
-            lat, lon, alt = gps if gps is not None else (float('nan'),) * 3
-            self.socket.sendall(struct.pack('!3d', lat, lon, alt))
+            self.socket.sendall(protocol.pack_gps(gps))
 
             self.stats["images_sent"] += 1
-            self.stats["total_bytes_sent"] += len(image_bytes) + 4 + 24
-            
-            # Receive response (3 doubles = 24 bytes)
-            response_data = self.socket.recv(24)
-            if len(response_data) != 24:
+            self.stats["total_bytes_sent"] += (
+                len(image_bytes) + protocol.SIZE_NBYTES + protocol.GPS_NBYTES)
+
+            # Receive the status reply.
+            response_data = protocol.recv_exact(self.socket, protocol.REPLY_NBYTES)
+            if response_data is None:
                 print("❌ Invalid response from server")
                 self.stats["errors"] += 1
                 return None
-            
-            # Unpack response
-            status_code, keyframe_count, total_frames = struct.unpack('3d', response_data)
-            
-            # Interpret response
-            if status_code == 1.0:
-                # Keyframe selected
+            status_code, keyframe_count, total_frames = protocol.unpack_reply(response_data)
+
+            if status_code == protocol.STATUS_KEYFRAME:
                 self.stats["keyframes_selected"] += 1
-                status_msg = f"KEYFRAME selected ({int(keyframe_count)}/{int(total_frames)})"
-                return True, status_msg
-            elif status_code == 0.0:
-                # Frame skipped
+                return True, f"KEYFRAME selected ({int(keyframe_count)}/{int(total_frames)})"
+            elif status_code == protocol.STATUS_SKIPPED:
                 self.stats["frames_skipped"] += 1
-                status_msg = f"Frame skipped ({int(keyframe_count)}/{int(total_frames)})"
-                return False, status_msg
-            elif status_code == -1.0:
-                # Error
+                return False, f"Frame skipped ({int(keyframe_count)}/{int(total_frames)})"
+            elif status_code == protocol.STATUS_ERROR:
                 self.stats["errors"] += 1
-                status_msg = "Server error"
-                return False, status_msg
+                return False, "Server error"
             else:
-                # Other status
-                status_msg = f"Status: {status_code} ({int(keyframe_count)}/{int(total_frames)})"
-                return False, status_msg
+                return False, f"Status: {status_code} ({int(keyframe_count)}/{int(total_frames)})"
                 
         except socket.timeout:
             print("⏰ Socket timeout")
@@ -370,7 +358,7 @@ class MappingTestClient:
             print(f"❌ Connection test error: {e}")
             try:
                 os.remove(test_image)
-            except:
+            except OSError:
                 pass
             return False
 

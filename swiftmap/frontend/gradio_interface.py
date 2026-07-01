@@ -9,10 +9,10 @@ Web-based interface for the VGGT mapping system featuring:
 - Real-time statistics and monitoring
 - Processing controls and parameter adjustment
 
-Layout matches TODO requirements:
+Layout:
 - No upload interface (processes TCP-collected images)
 - Large dual 3D viewers side by side
-- All controls positioned below viewers
+- All controls positioned below the viewers
 """
 
 import os
@@ -20,11 +20,8 @@ import sys
 import gradio as gr
 from swiftmap.frontend import _gradio_compat  # noqa: F401  (patches gradio_client schema parsing)
 import numpy as np
-import time
-import threading
 from datetime import datetime
 from typing import Dict, Tuple
-import json
 
 # Add vggt root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +29,12 @@ vggt_root = os.path.dirname(os.path.dirname(current_dir))
 if vggt_root not in sys.path:
     sys.path.append(vggt_root)
 
+from swiftmap.core import constants, protocol
 from swiftmap.core.session import MappingSession
+
+# GPS alignment method choices (radio labels).
+GPS_WITH_ICP = "With ICP — unsynced GPS trajectory (only GPS needed)"
+GPS_NO_ICP = "Without ICP — GPS synced 1:1 with keyframes"
 
 
 class MappingGradioInterface:
@@ -40,7 +42,7 @@ class MappingGradioInterface:
     Gradio web interface for VGGT mapping system.
     """
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 7860):
+    def __init__(self, host: str = "0.0.0.0", port: int = constants.GUI_PORT):
         """
         Initialize the Gradio interface.
         
@@ -61,16 +63,13 @@ class MappingGradioInterface:
 
         # NFN (Next Flight Navigation) Viser server state
         self.nfn_server = None
-        self.nfn_port = 7867
-        
-        # Statistics tracking
-        self.stats_history = []
-        
-        # Default parameters matching TODO requirements
+        self.nfn_port = constants.NFN_VISER_PORT
+
+        # Default control values shown in the UI.
         self.default_params = {
-            "tcp_port": 43322,
-            "min_disparity": 40.0,
-            "conf_threshold": 60.0,
+            "tcp_port": protocol.TCP_PORT,
+            "min_disparity": constants.DEFAULT_MIN_DISPARITY,
+            "conf_threshold": constants.DEFAULT_CONF_THRESHOLD,
             "visualize_flow": False,
             "mask_sky": True,
             "mask_dynamic": False
@@ -88,7 +87,7 @@ class MappingGradioInterface:
         # Set theme
         try:
             theme = gr.themes.Ocean()
-        except:
+        except Exception:
             theme = gr.themes.Default()
         
         with gr.Blocks(theme=theme, title="SwiftMap Mapping System") as interface:
@@ -100,7 +99,7 @@ class MappingGradioInterface:
             </div>
             """)
             
-            # Dual 3D viewers (large, side by side as per TODO)
+            # Dual 3D viewers (large, side by side)
             with gr.Row():
                 with gr.Column():
                     gr.HTML("<h3 style='text-align: center;'>3D Reconstruction</h3>")
@@ -118,7 +117,7 @@ class MappingGradioInterface:
                         camera_position=(2, 2, 2)
                     )
             
-            # Control panels below viewers as per TODO requirements
+            # Control panels below the viewers
             with gr.Tabs():
                 # TCP Server Control Tab
                 with gr.TabItem("🌐 SwiftMap Mapping Engine Control"):
@@ -168,8 +167,18 @@ class MappingGradioInterface:
                                 value=0,
                                 interactive=False
                             )
-                
-                # Processing Control Tab  
+
+                    # Live optical-flow preview (updates while "Show Optical Flow
+                    # Visualization" is enabled) — the arrows/label show what the
+                    # keyframe selector sees, for tuning the disparity threshold.
+                    with gr.Row():
+                        flow_preview = gr.Image(
+                            label="Optical Flow Preview (enable 'Show Optical Flow Visualization')",
+                            height=320,
+                            interactive=False
+                        )
+
+                # Processing Control Tab
                 with gr.TabItem("⚙️ Processing Control"):
                     with gr.Row():
                         with gr.Column():
@@ -193,26 +202,27 @@ class MappingGradioInterface:
                             )
 
                             max_keyframes_input = gr.Number(
-                                value=70,
+                                value=constants.DEFAULT_MAX_KEYFRAMES,
                                 label="Max Keyframes (cap, 0 = no cap)",
                                 precision=0,
                                 minimum=0
                             )
 
-                            # GPS alignment: upload a GPS trace CSV and align the
-                            # reconstruction so NFN viewpoints get real lat/lon/alt.
+                            # GPS alignment source: either an uploaded GPS trace CSV,
+                            # or the live trace auto-filled here while a client streams
+                            # frames carrying GPS. Align so NFN viewpoints get lat/lon/alt.
                             gps_csv_input = gr.File(
-                                label="GPS Traces CSV (latitude, longitude, altitude)",
+                                label="GPS Trace CSV (auto-filled while streaming GPS)",
                                 file_types=[".csv"]
                             )
-                            gps_synced_checkbox = gr.Checkbox(
-                                value=False,
-                                label="GPS synced 1:1 with keyframes (skip ICP, exact pairs)"
+                            gps_method_radio = gr.Radio(
+                                choices=[GPS_NO_ICP, GPS_WITH_ICP],
+                                value=GPS_NO_ICP,
+                                label="GPS Alignment Method",
+                                info=("Without ICP needs GPS synced 1:1 with keyframes "
+                                      "(paired stream, or a matching CSV). With ICP works "
+                                      "from any GPS trajectory.")
                             )
-                            calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment (CSV)", variant="secondary")
-                            calibrate_gps_stream_btn = gr.Button(
-                                "🛰️ Calibrate GPS from Stream (paired frames+GPS, no ICP)",
-                                variant="secondary")
                             gps_status = gr.Textbox(
                                 label="GPS Alignment",
                                 value="Not aligned",
@@ -220,9 +230,10 @@ class MappingGradioInterface:
                             )
 
                         with gr.Column():
-                            # Processing buttons
+                            # Processing buttons (GPS calibrate sits with the rest).
                             process_keyframes_btn = gr.Button("🔄 Process Keyframes with VGGT", variant="primary")
                             generate_confidence_btn = gr.Button("📊 Generate Confidence Map", variant="secondary")
+                            calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment", variant="secondary")
                             analyze_nfn_btn = gr.Button("🧭 Analyze with NFN (opens new page)", variant="secondary")
                             export_results_btn = gr.Button("💾 Export Results", variant="secondary")
 
@@ -290,12 +301,7 @@ class MappingGradioInterface:
 
             calibrate_gps_btn.click(
                 fn=self._calibrate_gps,
-                inputs=[gps_csv_input, gps_synced_checkbox],
-                outputs=[gps_status, processing_log]
-            )
-
-            calibrate_gps_stream_btn.click(
-                fn=self._calibrate_gps_stream,
+                inputs=[gps_csv_input, gps_method_radio],
                 outputs=[gps_status, processing_log]
             )
 
@@ -310,24 +316,15 @@ class MappingGradioInterface:
                 outputs=[processing_log]
             )
             
-            # Auto-refresh keyframe count and statistics
+            # Auto-refresh: keyframe count, stats, optical-flow preview, and the
+            # live GPS trace file box.
             keyframe_count_refresh = gr.Timer(value=2.0)
             keyframe_count_refresh.tick(
-                fn=self._update_statistics,
-                outputs=[keyframe_count, stats_display]
+                fn=self._update_ui,
+                inputs=[gps_csv_input],
+                outputs=[keyframe_count, stats_display, flow_preview, gps_csv_input]
             )
-            
-            # Store component references for internal use
-            self._components = {
-                "model_viewer": model_viewer,
-                "confidence_viewer": confidence_viewer,
-                "server_status": server_status,
-                "keyframe_count": keyframe_count,
-                "processing_status": processing_status,
-                "processing_log": processing_log,
-                "stats_display": stats_display
-            }
-        
+
         return interface
     
     def _start_server(self, tcp_port: int, min_disparity: float, visualize_flow: bool,
@@ -406,7 +403,8 @@ class MappingGradioInterface:
             return 0, f"Error clearing keyframes: {str(e)}"
     
     def _process_keyframes(self, conf_threshold: float, mask_sky: bool, mask_dynamic: bool,
-                           max_keyframes: int = 70) -> Tuple[str, str, str, int]:
+                           max_keyframes: int = constants.DEFAULT_MAX_KEYFRAMES
+                           ) -> Tuple[str, str, str, int]:
         """
         Process collected keyframes with VGGT.
 
@@ -478,44 +476,29 @@ class MappingGradioInterface:
         except Exception as e:
             return None, f"Error generating confidence map: {str(e)}"
 
-    def _calibrate_gps(self, gps_file, synced: bool = False) -> Tuple[str, str]:
-        """Align the reconstruction to a GPS trace CSV (so NFN viewpoints get GPS).
+    def _calibrate_gps(self, gps_file, method: str = GPS_NO_ICP) -> Tuple[str, str]:
+        """Align the reconstruction to GPS (so NFN viewpoints get lat/lon/alt).
 
-        synced=True: GPS rows correspond 1:1 to keyframes -> direct Umeyama, no ICP.
-        synced=False: unsynced trajectory -> ICP refinement.
+        method selects with/without ICP; the GPS source is the uploaded CSV, or the
+        live streamed trace when none is uploaded. The session validates availability
+        and (for the no-ICP path) that the GPS is synced 1:1 with the keyframes.
         """
         try:
-            if gps_file is None:
-                return "Not aligned", "GPS: upload a GPS trace CSV first."
-            # gr.File gives a filepath string (or an object with .name).
-            gps_path = getattr(gps_file, "name", gps_file)
+            use_icp = method == GPS_WITH_ICP
+            # gr.File gives a filepath string (or an object with .name); None if empty.
+            gps_path = getattr(gps_file, "name", gps_file) if gps_file else None
 
-            cfg = self.session.calibrate_gps(gps_path, use_icp=not synced)
+            cfg = self.session.align_gps(use_icp=use_icp, gps_csv_path=gps_path)
             if "error" in cfg:
                 return "Not aligned", f"GPS: {cfg['error']}"
 
-            mode = "exact pairs, no ICP" if synced else "trajectory ICP"
+            mode = cfg.get("mode", "icp" if use_icp else "synced")
+            init_rmse = cfg.get("init_rmse", float("nan"))
             status = (f"✅ Aligned ({mode}) — scale {cfg['scale']:.3f}, "
                       f"RMSE {cfg['rmse']:.2f} m ({cfg['num_points']} pts)")
             log = (f"GPS alignment [{mode}]: scale={cfg['scale']:.4f}, "
-                   f"RMSE={cfg['rmse']:.3f} m (init {cfg['init_rmse']:.3f} m, "
+                   f"RMSE={cfg['rmse']:.3f} m (init {init_rmse:.3f} m, "
                    f"{cfg['num_points']} pts).\n"
-                   f"Origin ({cfg['lat0']:.6f}, {cfg['lon0']:.6f}, {cfg['alt0']:.1f}).\n"
-                   f"NFN viewpoints will now include GPS coordinates.")
-            return status, log
-        except Exception as e:
-            return "Not aligned", f"GPS calibration error: {e}"
-
-    def _calibrate_gps_stream(self) -> Tuple[str, str]:
-        """Align using the GPS that streamed paired with each keyframe (no CSV, no ICP)."""
-        try:
-            cfg = self.session.calibrate_gps_from_stream()
-            if "error" in cfg:
-                return "Not aligned", f"GPS: {cfg['error']}"
-            status = (f"✅ Aligned (stream pairs) — scale {cfg['scale']:.3f}, "
-                      f"RMSE {cfg['rmse']:.2f} m ({cfg['num_points']} pts)")
-            log = (f"GPS alignment [stream-synced, no ICP]: scale={cfg['scale']:.4f}, "
-                   f"RMSE={cfg['rmse']:.3f} m ({cfg['num_points']} paired keyframes).\n"
                    f"Origin ({cfg['lat0']:.6f}, {cfg['lon0']:.6f}, {cfg['alt0']:.1f}).\n"
                    f"NFN viewpoints will now include GPS coordinates.")
             return status, log
@@ -535,12 +518,14 @@ class MappingGradioInterface:
         """
         try:
             # Compute the next-flight plan via the session (NFN on the latest run).
-            plan = self.session.plan(low_percentile=60.0, high_percentile=80.0)
+            plan = self.session.plan(low_percentile=constants.NFN_LOW_PERCENTILE,
+                                     high_percentile=constants.NFN_HIGH_PERCENTILE)
             if "error" in plan:
                 return f"⚠️ {plan['error']}", f"NFN: {plan['error']}"
 
             predictions = self.session.latest_predictions
-            conf_threshold = 60.0 if conf_threshold is None else float(conf_threshold)
+            conf_threshold = (constants.DEFAULT_CONF_THRESHOLD
+                              if conf_threshold is None else float(conf_threshold))
 
             # Lazy import so the rest of the app works even without viser installed
             from swiftmap.frontend.viewers.viser_view import visualize_nfn_with_viser
@@ -630,6 +615,31 @@ class MappingGradioInterface:
         except Exception as e:
             return f"Error exporting results: {str(e)}"
     
+    def _update_ui(self, current_gps_file):
+        """Timer tick: refresh keyframe count, stats, flow preview, and GPS file box.
+
+        Returns gr.update() where nothing should change so we neither clear the
+        optical-flow image when viz is off nor fight a user's uploaded CSV.
+        """
+        keyframe_count, stats = self._update_statistics()
+
+        # Optical-flow preview (None while viz is off -> leave the image as-is).
+        vis = self.session.latest_flow_vis() if self.session else None
+        flow_out = vis if vis is not None else gr.update()
+
+        # Auto-fill the GPS box with the live trace while streaming GPS, unless the
+        # user uploaded their own CSV (anything not our stream_gps.csv).
+        gps_out = gr.update()
+        cur = getattr(current_gps_file, "name", current_gps_file)
+        cur = str(cur) if cur else ""
+        has_stream = bool(self.session and self.session.has_stream_gps())
+        stream_csv = self.session.stream_gps_csv_path if has_stream else None
+        user_uploaded = bool(cur) and not cur.endswith("stream_gps.csv")
+        if stream_csv and not user_uploaded and cur != stream_csv:
+            gps_out = stream_csv
+
+        return keyframe_count, stats, flow_out, gps_out
+
     def _update_statistics(self) -> Tuple[int, Dict]:
         """
         Update keyframe count and statistics display.

@@ -24,6 +24,8 @@ across capture start/stop cycles. ``start(port, …)`` controls only the transpo
 """
 
 import os
+import glob
+import tempfile
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -31,6 +33,7 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
+from swiftmap.core import constants, protocol
 from swiftmap.core.keyframe_selector import KeyframeSelector
 from swiftmap.core.tcp_server import MappingTCPServer
 from swiftmap.core.vggt_mapper import VGGTMapper
@@ -42,7 +45,7 @@ class MappingSession:
 
     def __init__(self,
                  host: str = "0.0.0.0",
-                 min_disparity: float = 40.0,
+                 min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
                  visualize_flow: bool = False):
         self.host = host
 
@@ -60,11 +63,20 @@ class MappingSession:
         # Second-round cap: after optical-flow selection, the keyframe set passed to
         # VGGT is capped to this many, keeping the highest-priority (highest-disparity)
         # ones. 0 disables the cap. Keeps the VGGT batch within memory.
-        self.max_keyframes = 70
+        self.max_keyframes = constants.DEFAULT_MAX_KEYFRAMES
 
         # Transport is created on start() (its port is chosen then).
         self.tcp_server: Optional[MappingTCPServer] = None
         self.port: Optional[int] = None
+
+        # Session-owned scratch dir, reused across start/stop so keyframes survive a
+        # Stop (a fresh start() wipes it). The TCP server writes keyframe JPEGs here.
+        self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_session_")
+        # Ongoing GPS trace written live as GPS-tagged keyframes stream in, so the UI
+        # can show "a GPS file is present" exactly like a user upload.
+        self.stream_gps_csv_path = os.path.join(self.temp_dir, "stream_gps.csv")
+        self._stream_gps_rows = 0
+        self._gps_csv_lock = threading.Lock()
 
         # Collected keyframe file paths, accumulated as the server queue drains.
         self._keyframe_paths: List[str] = []
@@ -84,7 +96,7 @@ class MappingSession:
 
     # ============================================================ collection stage
     def start(self,
-              port: int = 43322,
+              port: int = protocol.TCP_PORT,
               min_disparity: Optional[float] = None,
               visualize_flow: Optional[bool] = None,
               keep_all: Optional[bool] = None) -> bool:
@@ -106,7 +118,8 @@ class MappingSession:
 
         self.port = port
         self.tcp_server = MappingTCPServer(host=self.host, port=port,
-                                           keyframe_callback=self._on_frame)
+                                           keyframe_callback=self._on_frame,
+                                           temp_dir=self.temp_dir)
 
         print("Starting SwiftMap Mapping Session...")
         print(f"Server: {self.host}:{port} | min disparity: {self.selector.min_disparity} px")
@@ -115,12 +128,15 @@ class MappingSession:
             print("Failed to initialize TCP server")
             return False
 
+        # Fresh capture: clear selector, keyframe lists, scratch dir, and GPS trace.
         self.selector.reset()
         self._keyframe_count = 0
         with self._paths_lock:
             self._keyframe_paths.clear()
         self._keyframe_gps.clear()
         self._reconstructed_gps.clear()
+        self._wipe_temp_dir()
+        self._reset_stream_gps_csv()
         self.start_time = datetime.now()
 
         self.server_thread = threading.Thread(target=self.tcp_server.start_server,
@@ -149,8 +165,42 @@ class MappingSession:
         is_keyframe = self.selector.is_keyframe(image)
         if is_keyframe:
             self._keyframe_count += 1
-            self._keyframe_gps.append(metadata.get("gps"))  # paired GPS (or None)
+            gps = metadata.get("gps")            # paired GPS (or None)
+            self._keyframe_gps.append(gps)
+            if gps is not None:
+                self._append_stream_gps(gps)     # grow the live GPS trace CSV
         return is_keyframe
+
+    # ---------------------------------------------------------- streamed GPS trace
+    def _reset_stream_gps_csv(self):
+        """Truncate the live GPS trace and write just the header (fresh capture)."""
+        with self._gps_csv_lock:
+            self._stream_gps_rows = 0
+            with open(self.stream_gps_csv_path, "w") as f:
+                f.write("latitude,longitude,altitude\n")
+
+    def _append_stream_gps(self, gps):
+        """Append one (lat, lon, alt) row to the live GPS trace CSV."""
+        with self._gps_csv_lock:
+            with open(self.stream_gps_csv_path, "a") as f:
+                f.write(f"{gps[0]:.8f},{gps[1]:.8f},{gps[2]:.3f}\n")
+            self._stream_gps_rows += 1
+
+    def has_stream_gps(self) -> bool:
+        """True once at least one GPS-tagged keyframe has streamed in."""
+        return self._stream_gps_rows > 0
+
+    def _wipe_temp_dir(self):
+        """Remove keyframe JPEGs from the scratch dir (keeps the dir itself)."""
+        for p in glob.glob(os.path.join(self.temp_dir, "keyframe_*")):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def latest_flow_vis(self):
+        """Latest optical-flow preview (RGB) for the UI, or None if viz is off."""
+        return self.selector.latest_flow_vis
 
     def _drain(self):
         """Pull newly-collected keyframes from the server queue into our list
@@ -183,6 +233,8 @@ class MappingSession:
         self._keyframe_count = 0
         self._keyframe_gps.clear()
         self._reconstructed_gps.clear()
+        self._wipe_temp_dir()
+        self._reset_stream_gps_csv()
 
     def configure_disparity_threshold(self, min_disparity: float):
         self.selector.configure_disparity_threshold(min_disparity)
@@ -353,6 +405,41 @@ class MappingSession:
         print(f"GPS aligned (stream-synced): scale={cfg['scale']:.3f}, "
               f"RMSE={cfg['rmse']:.3f} m ({cfg['num_points']} points)")
         return cfg
+
+    def align_gps(self, use_icp: bool, gps_csv_path: Optional[str] = None) -> Dict[str, Any]:
+        """Unified GPS alignment entry point used by the UI.
+
+        Resolves the GPS source, then aligns the reconstruction's camera trajectory:
+
+          * with ICP    -> treat GPS as an *unsynced* trajectory (counts may differ);
+                           any GPS trace works.
+          * without ICP -> require GPS *synced 1:1* with the keyframes; error otherwise.
+
+        GPS source: an uploaded CSV if one is given, otherwise the GPS that streamed
+        paired with each frame (the ongoing trace). Returns the transform cfg (with a
+        'mode' tag) or {'error': ...}.
+        """
+        preds = self.mapper.latest_predictions
+        if not preds or "camera_positions" not in preds:
+            return {"error": "No reconstruction with camera poses yet — process keyframes first."}
+
+        # A missing path, or one that is our own live trace, means "use stream pairs".
+        use_stream = (not gps_csv_path) or (
+            os.path.abspath(gps_csv_path) == os.path.abspath(self.stream_gps_csv_path))
+
+        if use_stream and not self.has_stream_gps():
+            return {"error": "No GPS available. Stream frames carrying GPS, or upload a "
+                             "GPS trace CSV, then reconstruct."}
+
+        if not use_icp:
+            # Synced (exact-pairs) mode.
+            if use_stream:
+                return self.calibrate_gps_from_stream()            # in-memory paired GPS
+            return self.calibrate_gps(gps_csv_path, use_icp=False)  # user CSV, must be 1:1
+
+        # ICP mode: any GPS trajectory works (counts need not match).
+        gps_src = self.stream_gps_csv_path if use_stream else gps_csv_path
+        return self.calibrate_gps(gps_src, use_icp=True)
 
     def to_gps(self, points):
         """Convert local point(s) to GPS [lat, lon, alt]; None if not calibrated."""

@@ -34,6 +34,9 @@ class FrameTracker:
         # used as a priority value when capping the keyframe count. Forced keyframes
         # (the first frame / reinitializations) get +inf so they're always kept.
         self.last_disparity = 0.0
+        # Latest optical-flow overlay (BGR) built when visualization is enabled, so
+        # the UI can show a live "what the selector sees" preview. None until drawn.
+        self.last_flow_vis = None
 
         # Feature detection parameters
         self.max_corners = 1000
@@ -136,9 +139,10 @@ class FrameTracker:
             mean_disparity = np.mean(displacement)
             self.last_disparity = float(mean_disparity)
             
-            # Optional visualization
+            # Optional visualization -> cache the annotated frame for the UI preview
             if visualize:
-                self._visualize_optical_flow(image, good_kf, good_next, mean_disparity, min_disparity)
+                self.last_flow_vis = self._visualize_optical_flow(
+                    image, good_kf, good_next, mean_disparity, min_disparity)
             
             # Determine if disparity is large enough for new keyframe
             is_keyframe = mean_disparity > min_disparity
@@ -158,42 +162,47 @@ class FrameTracker:
     
     def _visualize_optical_flow(self, image: np.ndarray, good_kf: np.ndarray, 
                                good_next: np.ndarray, mean_disparity: float, 
-                               min_disparity: float) -> None:
+                               min_disparity: float) -> Optional[np.ndarray]:
         """
-        Visualize optical flow vectors for debugging.
-        
+        Draw optical-flow vectors and status onto a copy of the frame.
+
         Args:
-            image: Current input image
+            image: Current input image (BGR)
             good_kf: Keyframe feature points that were successfully tracked
             good_next: Current frame feature points corresponding to good_kf
             mean_disparity: Computed mean disparity value
             min_disparity: Threshold for keyframe selection
+
+        Returns:
+            The annotated frame (BGR), or None on error. Returned (not shown) so the
+            caller can surface it in the web UI — this server is headless, so there
+            is no cv2.imshow window.
         """
         try:
             vis = image.copy()
-            
-            # Draw optical flow vectors
+
+            # Draw optical flow vectors. Red once motion crosses the threshold
+            # (this frame becomes a keyframe), green while still below it.
+            is_kf = mean_disparity > min_disparity
+            color = (0, 0, 255) if is_kf else (0, 255, 0)
             for p1, p2 in zip(good_kf, good_next):
                 p1 = tuple(p1.ravel().astype(int))
                 p2 = tuple(p2.ravel().astype(int))
-                
-                # Color coding: green if below threshold, red if above
-                color = (0, 255, 0) if mean_disparity <= min_disparity else (0, 0, 255)
                 cv2.arrowedLine(vis, p1, p2, color=color, thickness=2, tipLength=0.3)
-            
+
             # Add text information
             text = f"Mean Disparity: {mean_disparity:.2f} (Threshold: {min_disparity})"
             cv2.putText(vis, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            status_text = "KEYFRAME" if mean_disparity > min_disparity else "SKIP"
-            status_color = (0, 0, 255) if mean_disparity > min_disparity else (0, 255, 0)
+
+            status_text = "KEYFRAME" if is_kf else "SKIP"
+            status_color = (0, 0, 255) if is_kf else (0, 255, 0)
             cv2.putText(vis, status_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-            
-            # Skip GUI visualization - only log to console
-            pass
-            
+
+            return vis
+
         except Exception as e:
             print(f"Error in optical flow visualization: {e}")
+            return None
     
     def get_stats(self) -> dict:
         """
@@ -216,6 +225,7 @@ class FrameTracker:
         self.kf_gray = None
         self.frame_count = 0
         self.last_disparity = 0.0
+        self.last_flow_vis = None
         print("Frame tracker reset")
 
 

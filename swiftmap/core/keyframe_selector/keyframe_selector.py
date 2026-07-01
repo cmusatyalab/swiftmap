@@ -12,17 +12,19 @@ collection of selected keyframes.
 """
 
 import time
+import cv2
 import numpy as np
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+from swiftmap.core import constants
 from swiftmap.core.keyframe_selector.frame_tracker import FrameTracker
 
 
 class KeyframeSelector:
     """Optical-flow keyframe selector: a pure decision over a single frame."""
 
-    def __init__(self, min_disparity: float = 40.0, visualize_flow: bool = False,
-                 keep_all: bool = False):
+    def __init__(self, min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
+                 visualize_flow: bool = False, keep_all: bool = False):
         """
         Args:
             min_disparity: minimum mean optical-flow disparity (pixels) for a frame
@@ -61,9 +63,16 @@ class KeyframeSelector:
         """
         start = time.time()
         if self.keep_all:
-            # Skip selection entirely -- every frame is a keyframe. No disparity
-            # priority, so record 0.0 (the session falls back to even subsampling
-            # if it has to cap a keep-all run).
+            # Keep every frame -- no selection. Still run optical flow purely to
+            # refresh the preview when visualization is on (the return value is
+            # ignored here; the flow is only for the overlay). No disparity priority,
+            # so record 0.0 (the session falls back to even subsampling if it has to
+            # cap a keep-all run).
+            if self.visualize_flow:
+                try:
+                    self.frame_tracker.compute_disparity(image, self.min_disparity, True)
+                except Exception as e:
+                    print(f"Error in optical flow visualization: {e}")
             self._update_stats(time.time() - start, True)
             self.keyframe_values.append(0.0)
             return True
@@ -78,6 +87,18 @@ class KeyframeSelector:
         if selected:
             self.keyframe_values.append(float(self.frame_tracker.last_disparity))
         return selected
+
+    @property
+    def latest_flow_vis(self) -> Optional[np.ndarray]:
+        """Latest optical-flow overlay as an RGB array for the UI, or None.
+
+        Only populated while ``visualize_flow`` is enabled. Converts the tracker's
+        BGR frame to RGB (what gr.Image expects).
+        """
+        vis = self.frame_tracker.last_flow_vis
+        if vis is None:
+            return None
+        return cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
     def reset(self):
         """Reset the optical-flow tracker and per-run statistics (new session)."""
