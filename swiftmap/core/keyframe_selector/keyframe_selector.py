@@ -30,9 +30,9 @@ class KeyframeSelector:
             min_disparity: minimum mean optical-flow disparity (pixels) for a frame
                            to be selected as a keyframe.
             visualize_flow: draw optical-flow vectors (debugging) in compute_disparity.
-            keep_all: if True, skip optical-flow selection and keep *every* frame as a
-                      keyframe (no thinning). Useful for a denser camera trajectory,
-                      but watch VGGT's batch/memory limit downstream.
+            keep_all: if True, skip optical-flow selection -- every frame is a
+                      candidate keyframe (the session's cap then bounds them as a FIFO
+                      window). Useful for a denser, unfiltered trajectory.
         """
         self.min_disparity = min_disparity
         self.visualize_flow = visualize_flow
@@ -51,6 +51,10 @@ class KeyframeSelector:
         # selection order. Used by the session to cap the keyframe count by priority.
         self.keyframe_values = []
 
+        # Optical-flow overlay (BGR) of the last *selected* keyframe, so the preview
+        # shows what was actually kept and holds steady between selections.
+        self._keyframe_vis = None
+
     def is_keyframe(self, image: np.ndarray) -> bool:
         """
         Decide whether ``image`` should be a keyframe.
@@ -63,16 +67,10 @@ class KeyframeSelector:
         """
         start = time.time()
         if self.keep_all:
-            # Keep every frame -- no selection. Still run optical flow purely to
-            # refresh the preview when visualization is on (the return value is
-            # ignored here; the flow is only for the overlay). No disparity priority,
-            # so record 0.0 (the session falls back to even subsampling if it has to
-            # cap a keep-all run).
+            # No selection -> every frame is kept; the preview is just the raw last
+            # frame added (no optical-flow overlay). Record 0.0 as the (unused) score.
             if self.visualize_flow:
-                try:
-                    self.frame_tracker.compute_disparity(image, self.min_disparity, True)
-                except Exception as e:
-                    print(f"Error in optical flow visualization: {e}")
+                self._keyframe_vis = image
             self._update_stats(time.time() - start, True)
             self.keyframe_values.append(0.0)
             return True
@@ -86,19 +84,21 @@ class KeyframeSelector:
         self._update_stats(time.time() - start, selected)
         if selected:
             self.keyframe_values.append(float(self.frame_tracker.last_disparity))
+            # Freeze the preview on the frame that was actually kept.
+            self._keyframe_vis = self.frame_tracker.last_flow_vis
         return selected
 
     @property
     def latest_flow_vis(self) -> Optional[np.ndarray]:
-        """Latest optical-flow overlay as an RGB array for the UI, or None.
+        """Preview (RGB) of the last frame added to the buffer, or None.
 
-        Only populated while ``visualize_flow`` is enabled. Converts the tracker's
-        BGR frame to RGB (what gr.Image expects).
+        Without selection it is the raw last frame; with disparity scoring it is the
+        optical-flow overlay of the last selected keyframe. Populated only while
+        ``visualize_flow`` is enabled; holds between additions.
         """
-        vis = self.frame_tracker.last_flow_vis
-        if vis is None:
+        if self._keyframe_vis is None:
             return None
-        return cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
+        return cv2.cvtColor(self._keyframe_vis, cv2.COLOR_BGR2RGB)
 
     def reset(self):
         """Reset the optical-flow tracker and per-run statistics (new session)."""
@@ -107,6 +107,7 @@ class KeyframeSelector:
         self.stats["keyframes_selected"] = 0
         self.stats["processing_times"] = []
         self.keyframe_values = []
+        self._keyframe_vis = None
 
     def configure_disparity_threshold(self, min_disparity: float):
         """Update the minimum disparity threshold."""

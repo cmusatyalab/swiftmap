@@ -60,9 +60,10 @@ class MappingSession:
         # Latest NFN plan (set by plan(); used by export).
         self.latest_plan = None
 
-        # Second-round cap: after optical-flow selection, the keyframe set passed to
-        # VGGT is capped to this many, keeping the highest-priority (highest-disparity)
-        # ones. 0 disables the cap. Keeps the VGGT batch within memory.
+        # Live keyframe cap: at most this many keyframes are retained during
+        # collection. With keyframe selection, an incoming frame replaces the
+        # lowest-disparity one only if it scores higher; without selection the cap is a
+        # FIFO window (keep the newest). 0 disables the cap.
         self.max_keyframes = constants.DEFAULT_MAX_KEYFRAMES
 
         # Transport is created on start() (its port is chosen then).
@@ -72,22 +73,20 @@ class MappingSession:
         # Session-owned scratch dir, reused across start/stop so keyframes survive a
         # Stop (a fresh start() wipes it). The TCP server writes keyframe JPEGs here.
         self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_session_")
-        # Ongoing GPS trace written live as GPS-tagged keyframes stream in, so the UI
-        # can show "a GPS file is present" exactly like a user upload.
+        # Live GPS trace, rewritten to mirror the retained keyframes so the UI shows
+        # "a GPS file is present" like a user upload and it stays 1:1 with them.
         self.stream_gps_csv_path = os.path.join(self.temp_dir, "stream_gps.csv")
         self._stream_gps_rows = 0
         self._gps_csv_lock = threading.Lock()
 
-        # Collected keyframe file paths, accumulated as the server queue drains.
-        self._keyframe_paths: List[str] = []
+        # Bounded priority buffer of retained keyframes. Each entry:
+        #   {"seq": capture index, "score": disparity, "path": jpeg, "gps": (lat,lon,alt)|None}
+        # Kept unordered; read back sorted by "seq" (capture order). Guarded by the lock.
+        self._buffer: List[Dict[str, Any]] = []
+        self._seq = 0             # running capture index of selected keyframes
+        self._total_selected = 0  # keyframes ever selected (for stats)
         self._paths_lock = threading.Lock()
-        self._keyframe_count = 0
-
-        # Per-keyframe GPS [lat, lon, alt] paired with each selected keyframe (in
-        # selection order; None when a frame arrived without GPS). Lets us calibrate
-        # directly from the matched stream pairs (no CSV, no ICP).
-        self._keyframe_gps: List = []
-        # GPS for the capped keyframes actually sent to VGGT (set by reconstruct()).
+        # GPS of the keyframes sent to VGGT (set by reconstruct(); 1:1 with poses).
         self._reconstructed_gps: List = []
 
         self.is_running = False
@@ -128,12 +127,12 @@ class MappingSession:
             print("Failed to initialize TCP server")
             return False
 
-        # Fresh capture: clear selector, keyframe lists, scratch dir, and GPS trace.
+        # Fresh capture: clear selector, keyframe buffer, scratch dir, and GPS trace.
         self.selector.reset()
-        self._keyframe_count = 0
         with self._paths_lock:
-            self._keyframe_paths.clear()
-        self._keyframe_gps.clear()
+            self._buffer.clear()
+            self._seq = 0
+            self._total_selected = 0
         self._reconstructed_gps.clear()
         self._wipe_temp_dir()
         self._reset_stream_gps_csv()
@@ -161,14 +160,14 @@ class MappingSession:
         print("Mapping session stopped")
 
     def _on_frame(self, image, metadata: Dict[str, Any]) -> bool:
-        """TCP-server callback: run selection, count keyframes, keep paired GPS."""
+        """TCP-server callback: run selection and tag the frame with its priority
+        score. The saved keyframe is folded into the bounded buffer on the next drain.
+        """
         is_keyframe = self.selector.is_keyframe(image)
         if is_keyframe:
-            self._keyframe_count += 1
-            gps = metadata.get("gps")            # paired GPS (or None)
-            self._keyframe_gps.append(gps)
-            if gps is not None:
-                self._append_stream_gps(gps)     # grow the live GPS trace CSV
+            # Priority recorded by the selector: disparity, +inf for anchor/forced
+            # keyframes, 0.0 for keep-all. Carried in metadata to the drain step.
+            metadata["score"] = float(self.selector.keyframe_values[-1])
         return is_keyframe
 
     # ---------------------------------------------------------- streamed GPS trace
@@ -179,49 +178,115 @@ class MappingSession:
             with open(self.stream_gps_csv_path, "w") as f:
                 f.write("latitude,longitude,altitude\n")
 
-    def _append_stream_gps(self, gps):
-        """Append one (lat, lon, alt) row to the live GPS trace CSV."""
+    def _write_gps_csv(self, entries):
+        """Rewrite the GPS trace to mirror the retained keyframes (capture order)."""
         with self._gps_csv_lock:
-            with open(self.stream_gps_csv_path, "a") as f:
-                f.write(f"{gps[0]:.8f},{gps[1]:.8f},{gps[2]:.3f}\n")
-            self._stream_gps_rows += 1
+            rows = 0
+            with open(self.stream_gps_csv_path, "w") as f:
+                f.write("latitude,longitude,altitude\n")
+                for e in entries:
+                    g = e["gps"]
+                    if g is not None:
+                        f.write(f"{g[0]:.8f},{g[1]:.8f},{g[2]:.3f}\n")
+                        rows += 1
+            self._stream_gps_rows = rows
 
     def has_stream_gps(self) -> bool:
-        """True once at least one GPS-tagged keyframe has streamed in."""
+        """True once at least one retained keyframe carries GPS."""
         return self._stream_gps_rows > 0
 
     def _wipe_temp_dir(self):
         """Remove keyframe JPEGs from the scratch dir (keeps the dir itself)."""
         for p in glob.glob(os.path.join(self.temp_dir, "keyframe_*")):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+            self._remove_file(p)
+
+    @staticmethod
+    def _remove_file(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     def latest_flow_vis(self):
         """Latest optical-flow preview (RGB) for the UI, or None if viz is off."""
         return self.selector.latest_flow_vis
 
+    # -------------------------------------------------------- bounded keyframe buffer
     def _drain(self):
-        """Pull newly-collected keyframes from the server queue into our list
-        (the server's getter drains its internal queue)."""
+        """Fold newly-saved keyframes from the server queue into the bounded priority
+        buffer (evicting the weakest when over the cap) and keep the GPS CSV in sync."""
         if not self.tcp_server:
             return
-        for kf in self.tcp_server.get_collected_keyframes():
-            path = kf.get("path")
-            if path and os.path.exists(path):
-                with self._paths_lock:
-                    self._keyframe_paths.append(path)
+        changed = False
+        snapshot = None
+        with self._paths_lock:
+            for kf in self.tcp_server.get_collected_keyframes():
+                path = kf.get("path")
+                if not path or not os.path.exists(path):
+                    continue
+                meta = kf.get("metadata", {})
+                entry = {"seq": self._seq, "score": float(meta.get("score", 0.0)),
+                         "path": path, "gps": meta.get("gps")}
+                self._seq += 1
+                self._total_selected += 1
+                changed |= self._insert_entry(entry)
+            changed |= self._trim_to_cap()  # in case the cap was lowered mid-capture
+            if changed:
+                snapshot = sorted(self._buffer, key=lambda e: e["seq"])
+        if snapshot is not None:
+            self._write_gps_csv(snapshot)
+
+    def _priority_key(self):
+        """What "best" means when the buffer is full: disparity score under keyframe
+        selection, or recency (seq) without it (FIFO window)."""
+        return "seq" if self.selector.keep_all else "score"
+
+    def _insert_entry(self, entry) -> bool:
+        """Fold one selected keyframe into the buffer. Returns whether the buffer
+        changed. Caller holds the lock.
+
+        Without keyframe selection there is no score, so the cap is a FIFO window:
+        every new frame is kept and the oldest is dropped. With selection, keep the
+        top-``cap`` by disparity, replacing the weakest only if the new frame beats it.
+        """
+        cap = self.max_keyframes
+        if not cap or len(self._buffer) < cap:
+            self._buffer.append(entry)
+            return True
+
+        key = self._priority_key()
+        weakest = min(range(len(self._buffer)), key=lambda i: self._buffer[i][key])
+        if entry[key] > self._buffer[weakest][key]:  # newest seq always wins under FIFO
+            self._remove_file(self._buffer[weakest]["path"])
+            self._buffer[weakest] = entry
+            return True
+        self._remove_file(entry["path"])  # not good enough to keep
+        return False
+
+    def _trim_to_cap(self) -> bool:
+        """Drop the lowest-priority keyframes if the buffer exceeds the cap (e.g. the
+        cap was lowered): weakest score with selection, oldest (FIFO) without. Returns
+        whether anything was removed. Caller holds the lock."""
+        cap = self.max_keyframes
+        if not cap or len(self._buffer) <= cap:
+            return False
+        self._buffer.sort(key=lambda e: e[self._priority_key()], reverse=True)
+        for e in self._buffer[cap:]:
+            self._remove_file(e["path"])
+        del self._buffer[cap:]
+        return True
 
     def get_keyframe_paths(self) -> List[str]:
-        """File paths of all keyframes collected so far."""
+        """JPEG paths of the retained keyframes, in capture order."""
         self._drain()
         with self._paths_lock:
-            return list(self._keyframe_paths)
+            return [e["path"] for e in sorted(self._buffer, key=lambda e: e["seq"])]
 
     def get_keyframe_count(self) -> int:
-        """Number of keyframes selected so far (updated live as frames arrive)."""
-        return self._keyframe_count
+        """Number of keyframes currently retained (<= the cap)."""
+        self._drain()
+        with self._paths_lock:
+            return len(self._buffer)
 
     def clear_keyframes(self):
         """Discard all collected keyframes and reset selection state."""
@@ -229,9 +294,9 @@ class MappingSession:
             self.tcp_server.clear_keyframes()
         self.selector.reset()
         with self._paths_lock:
-            self._keyframe_paths.clear()
-        self._keyframe_count = 0
-        self._keyframe_gps.clear()
+            self._buffer.clear()
+            self._seq = 0
+            self._total_selected = 0
         self._reconstructed_gps.clear()
         self._wipe_temp_dir()
         self._reset_stream_gps_csv()
@@ -241,39 +306,17 @@ class MappingSession:
 
     # =============================================================== mapping stage
     def reconstruct(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Run VGGT reconstruction on the collected keyframes (capped if needed)."""
-        paths = self._capped_keyframe_paths()
+        """Run VGGT reconstruction on the retained keyframes (already <= the cap)."""
+        self._drain()
+        with self._paths_lock:
+            entries = sorted(self._buffer, key=lambda e: e["seq"])
+            paths = [e["path"] for e in entries]
+            self._reconstructed_gps = [e["gps"] for e in entries]
         if not paths:
             return {"success": False, "error": "No keyframes collected yet",
                     "keyframe_count": 0}
+        print(f"Reconstructing {len(paths)} keyframes (cap={self.max_keyframes})")
         return self.mapper.process_keyframes(paths, params)
-
-    def _capped_keyframe_paths(self) -> List[str]:
-        """Keyframe paths after the second-round cap.
-
-        If more than ``max_keyframes`` were collected, keep the highest-priority
-        (highest-disparity) ones; falls back to even subsampling when priorities
-        aren't usable (e.g. keep-all). Returns paths in capture order.
-        """
-        paths = self.get_keyframe_paths()
-        gps = list(self._keyframe_gps)
-        cap = self.max_keyframes
-        if not cap or len(paths) <= cap:
-            keep = list(range(len(paths)))
-        else:
-            values = list(self.selector.keyframe_values)
-            if len(values) == len(paths) and len(set(values)) > 1:
-                # Priority: keep the top-`cap` by disparity, then restore capture order.
-                order = sorted(range(len(paths)), key=lambda i: values[i], reverse=True)
-                keep = sorted(order[:cap])
-            else:
-                # No usable priority -> evenly spaced across the sequence.
-                keep = sorted(set(np.linspace(0, len(paths) - 1, cap).round().astype(int).tolist()))
-            print(f"Keyframe cap: {len(paths)} -> {len(keep)} (max_keyframes={cap})")
-
-        # Carry the paired GPS for exactly the kept keyframes (same order as paths).
-        self._reconstructed_gps = [gps[i] if i < len(gps) else None for i in keep]
-        return [paths[i] for i in keep]
 
     def get_latest_results(self) -> Dict[str, Any]:
         """Latest reconstruction results (or {'error': ...} if none yet)."""
@@ -524,7 +567,8 @@ class MappingSession:
         stats = self.selector.get_stats()
         if self.tcp_server:
             stats["tcp_server_stats"] = self.tcp_server.get_stats()
-        stats["keyframes_selected"] = self._keyframe_count
+        stats["keyframes_selected"] = self._total_selected
+        stats["keyframes_retained"] = len(self._buffer)
         if self.start_time:
             stats["session_duration"] = str(datetime.now() - self.start_time)
         return stats

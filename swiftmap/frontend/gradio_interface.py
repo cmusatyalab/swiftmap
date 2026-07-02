@@ -131,6 +131,11 @@ class MappingGradioInterface:
                                 maximum=65535
                             )
                             
+                            keep_all_checkbox = gr.Checkbox(
+                                value=False,
+                                label="Without disparity-scored selection"
+                            )
+
                             min_disparity_input = gr.Slider(
                                 minimum=10,
                                 maximum=100,
@@ -138,15 +143,17 @@ class MappingGradioInterface:
                                 step=1,
                                 label="Min Disparity Threshold (pixels)"
                             )
-                            
-                            visualize_flow_checkbox = gr.Checkbox(
-                                value=self.default_params["visualize_flow"],
-                                label="Show Optical Flow Visualization"
+
+                            max_keyframes_input = gr.Number(
+                                value=constants.DEFAULT_MAX_KEYFRAMES,
+                                label="Max Frames (0 = no cap)",
+                                precision=0,
+                                minimum=0
                             )
 
-                            keep_all_checkbox = gr.Checkbox(
-                                value=False,
-                                label="Keep all frames (skip keyframe selection)"
+                            visualize_flow_checkbox = gr.Checkbox(
+                                value=self.default_params["visualize_flow"],
+                                label="Show keyframe preview"
                             )
 
                         with gr.Column():
@@ -168,12 +175,12 @@ class MappingGradioInterface:
                                 interactive=False
                             )
 
-                    # Live optical-flow preview (updates while "Show Optical Flow
-                    # Visualization" is enabled) — the arrows/label show what the
-                    # keyframe selector sees, for tuning the disparity threshold.
+                    # Live keyframe preview (updates while "Show keyframe preview" is
+                    # enabled): the raw last frame without disparity scoring, or the
+                    # optical-flow overlay of the last keyframe with it.
                     with gr.Row():
                         flow_preview = gr.Image(
-                            label="Optical Flow Preview (enable 'Show Optical Flow Visualization')",
+                            label="Keyframe Preview (enable 'Show keyframe preview')",
                             height=320,
                             interactive=False
                         )
@@ -199,13 +206,6 @@ class MappingGradioInterface:
                             mask_dynamic_checkbox = gr.Checkbox(
                                 value=self.default_params["mask_dynamic"],
                                 label="Filter Dynamic Objects"
-                            )
-
-                            max_keyframes_input = gr.Number(
-                                value=constants.DEFAULT_MAX_KEYFRAMES,
-                                label="Max Keyframes (cap, 0 = no cap)",
-                                precision=0,
-                                minimum=0
                             )
 
                             # GPS alignment source: either an uploaded GPS trace CSV,
@@ -286,6 +286,16 @@ class MappingGradioInterface:
                 outputs=[keyframe_count, processing_log]
             )
             
+            # Apply the collection cap to the session live, so it bounds the keyframe
+            # buffer during capture (not just at reconstruct time).
+            max_keyframes_input.change(fn=self._set_max_keyframes, inputs=[max_keyframes_input])
+
+            # The disparity threshold only applies with disparity scoring -> grey it
+            # out when "without disparity-scored selection" is checked.
+            keep_all_checkbox.change(
+                fn=lambda without: gr.update(interactive=not without),
+                inputs=[keep_all_checkbox], outputs=[min_disparity_input])
+
             # Processing Controls
             process_keyframes_btn.click(
                 fn=self._process_keyframes,
@@ -313,7 +323,7 @@ class MappingGradioInterface:
 
             export_results_btn.click(
                 fn=self._export_results,
-                outputs=[processing_log]
+                outputs=[processing_status, processing_log]
             )
             
             # Auto-refresh: keyframe count, stats, optical-flow preview, and the
@@ -401,7 +411,14 @@ class MappingGradioInterface:
                 
         except Exception as e:
             return 0, f"Error clearing keyframes: {str(e)}"
-    
+
+    def _set_max_keyframes(self, max_keyframes):
+        """Apply the collection cap to the session so it bounds the live buffer."""
+        try:
+            self.session.max_keyframes = max(0, int(max_keyframes))
+        except (TypeError, ValueError):
+            pass
+
     def _process_keyframes(self, conf_threshold: float, mask_sky: bool, mask_dynamic: bool,
                            max_keyframes: int = constants.DEFAULT_MAX_KEYFRAMES
                            ) -> Tuple[str, str, str, int]:
@@ -490,7 +507,7 @@ class MappingGradioInterface:
 
             cfg = self.session.align_gps(use_icp=use_icp, gps_csv_path=gps_path)
             if "error" in cfg:
-                return "Not aligned", f"GPS: {cfg['error']}"
+                return f"⚠️ Not aligned — {cfg['error']}", f"GPS: {cfg['error']}"
 
             mode = cfg.get("mode", "icp" if use_icp else "synced")
             init_rmse = cfg.get("init_rmse", float("nan"))
@@ -522,6 +539,13 @@ class MappingGradioInterface:
                                      high_percentile=constants.NFN_HIGH_PERCENTILE)
             if "error" in plan:
                 return f"⚠️ {plan['error']}", f"NFN: {plan['error']}"
+
+            # No viewpoints (e.g. saturated/uniform confidence): report why, don't
+            # open an empty viewer.
+            if plan.get("num_viewpoints", 0) == 0:
+                msg = plan.get("statistics", {}).get(
+                    "message", "No low-confidence regions to target.")
+                return f"### ⚠️ No next-flight plan\n{msg}", f"NFN: {msg}"
 
             predictions = self.session.latest_predictions
             conf_threshold = (constants.DEFAULT_CONF_THRESHOLD
@@ -586,34 +610,40 @@ class MappingGradioInterface:
         except Exception as e:
             return f"❌ NFN failed: {e}", f"NFN error: {e}"
 
-    def _export_results(self) -> str:
-        """
-        Export processing results.
-        
-        Returns:
-            Log message
-        """
+    def _export_results(self) -> Tuple[str, str]:
+        """Export processing results. Returns (status, log): a short status for the
+        button's status box and the detailed file list for the log."""
         try:
             if not self.session.latest_predictions:
-                return "No results to export. Process keyframes first."
+                return "⚠️ Nothing to export", "No results to export. Process keyframes first."
 
-            msgs = []
+            msgs, items, out_dir = [], [], None
             poses_path = self.session.export_camera_poses()
-            msgs.append(f"Camera poses → {poses_path}" if poses_path
-                        else "Failed to export camera poses")
+            if poses_path:
+                msgs.append(f"Camera poses → {poses_path}")
+                items.append("camera poses")
+                out_dir = os.path.dirname(poses_path)
+            else:
+                msgs.append("Failed to export camera poses")
 
-            # NFN plan (+ transform.json if GPS-aligned), if NFN has been run.
+            # NFN plan (+ transform.json + KML if GPS-aligned), if NFN has been run.
             nfn_path = self.session.export_nfn_plan()
             if nfn_path:
                 msgs.append(f"NFN viewpoints → {nfn_path}")
+                items.append("NFN viewpoints")
+                out_dir = os.path.dirname(nfn_path)
                 if self.session.gps_transform is not None:
                     msgs.append("GPS transform → transform.json")
                     msgs.append("Targets KML (Google My Maps) → next_flight_viewpoints.kml")
+                    items += ["GPS transform", "targets KML"]
 
-            return "\n".join(msgs)
+            if not items:
+                return "⚠️ Nothing was exported", "\n".join(msgs)
+            where = f" to {out_dir}" if out_dir else ""
+            return f"✅ Exported {', '.join(items)}{where}", "\n".join(msgs)
 
         except Exception as e:
-            return f"Error exporting results: {str(e)}"
+            return "❌ Export failed", f"Error exporting results: {str(e)}"
     
     def _update_ui(self, current_gps_file):
         """Timer tick: refresh keyframe count, stats, flow preview, and GPS file box.
