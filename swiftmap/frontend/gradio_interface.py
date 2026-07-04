@@ -187,6 +187,21 @@ class MappingGradioInterface:
 
                 # Processing Control Tab
                 with gr.TabItem("⚙️ Processing Control"):
+                    # Model gate: the reconstruction backbone must be chosen before
+                    # anything else in this tab is usable. Every control below is
+                    # created disabled (grayed out) and only enabled once a model
+                    # is picked; all processing then runs on the chosen backbone.
+                    backbone_choices = [(m["label"], m["name"])
+                                        for m in self.session.available_backbones()]
+                    model_selector = gr.Radio(
+                        choices=backbone_choices,
+                        value=None,
+                        label="① Select reconstruction model",
+                        info=("Pick the model used for inference. All controls below "
+                              "stay disabled until you choose one; switching models "
+                              "clears the current reconstruction.")
+                    )
+
                     with gr.Row():
                         with gr.Column():
                             # Processing parameters
@@ -195,17 +210,20 @@ class MappingGradioInterface:
                                 maximum=100,
                                 value=self.default_params["conf_threshold"],
                                 step=1,
-                                label="Confidence Threshold (%)"
+                                label="Confidence Threshold (%)",
+                                interactive=False
                             )
-                            
+
                             mask_sky_checkbox = gr.Checkbox(
                                 value=self.default_params["mask_sky"],
-                                label="Filter Sky"
+                                label="Filter Sky",
+                                interactive=False
                             )
-                            
+
                             mask_dynamic_checkbox = gr.Checkbox(
                                 value=self.default_params["mask_dynamic"],
-                                label="Filter Dynamic Objects"
+                                label="Filter Dynamic Objects",
+                                interactive=False
                             )
 
                             # GPS alignment source: either an uploaded GPS trace CSV,
@@ -213,7 +231,8 @@ class MappingGradioInterface:
                             # frames carrying GPS. Align so NFN viewpoints get lat/lon/alt.
                             gps_csv_input = gr.File(
                                 label="GPS Trace CSV (auto-filled while streaming GPS)",
-                                file_types=[".csv"]
+                                file_types=[".csv"],
+                                interactive=False
                             )
                             gps_method_radio = gr.Radio(
                                 choices=[GPS_NO_ICP, GPS_WITH_ICP],
@@ -221,7 +240,8 @@ class MappingGradioInterface:
                                 label="GPS Alignment Method",
                                 info=("Without ICP needs GPS synced 1:1 with keyframes "
                                       "(paired stream, or a matching CSV). With ICP works "
-                                      "from any GPS trajectory.")
+                                      "from any GPS trajectory."),
+                                interactive=False
                             )
                             gps_status = gr.Textbox(
                                 label="GPS Alignment",
@@ -231,24 +251,34 @@ class MappingGradioInterface:
 
                         with gr.Column():
                             # Processing buttons (GPS calibrate sits with the rest).
-                            process_keyframes_btn = gr.Button("🔄 Process Keyframes with VGGT", variant="primary")
-                            generate_confidence_btn = gr.Button("📊 Generate Confidence Map", variant="secondary")
-                            calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment", variant="secondary")
-                            analyze_nfn_btn = gr.Button("🧭 Analyze with NFN (opens new page)", variant="secondary")
-                            export_results_btn = gr.Button("💾 Export Results", variant="secondary")
+                            process_keyframes_btn = gr.Button("🔄 Process Keyframes", variant="primary", interactive=False)
+                            generate_confidence_btn = gr.Button("📊 Generate Confidence Map", variant="secondary", interactive=False)
+                            calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment", variant="secondary", interactive=False)
+                            analyze_nfn_btn = gr.Button("🧭 Analyze with NFN (opens new page)", variant="secondary", interactive=False)
+                            export_results_btn = gr.Button("💾 Export Results", variant="secondary", interactive=False)
 
                             # Processing status
                             processing_status = gr.Textbox(
                                 label="Processing Status",
-                                value="Ready",
+                                value="Select a model above to begin",
                                 interactive=False
                             )
 
                             # NFN result link / summary (opens the Viser viewer in a new page)
                             nfn_link = gr.Markdown(
-                                "Run VGGT first, then click **Analyze with NFN** to open the "
-                                "coverage-gap & viewpoint viewer in a new page."
+                                "Select a model and run reconstruction first, then click "
+                                "**Analyze with NFN** to open the coverage-gap & viewpoint "
+                                "viewer in a new page."
                             )
+
+                    # Controls gated behind model selection (order must match the
+                    # updates returned by _select_model).
+                    model_gated_controls = [
+                        conf_threshold_slider, mask_sky_checkbox, mask_dynamic_checkbox,
+                        gps_csv_input, gps_method_radio,
+                        process_keyframes_btn, generate_confidence_btn,
+                        calibrate_gps_btn, analyze_nfn_btn, export_results_btn,
+                    ]
                 
                 # Statistics Tab
                 with gr.TabItem("📈 Statistics & Info"):
@@ -295,6 +325,14 @@ class MappingGradioInterface:
             keep_all_checkbox.change(
                 fn=lambda without: gr.update(interactive=not without),
                 inputs=[keep_all_checkbox], outputs=[min_disparity_input])
+
+            # Model selection gate: enable/disable everything in the tab and point
+            # the session at the chosen backbone.
+            model_selector.change(
+                fn=self._select_model,
+                inputs=[model_selector],
+                outputs=[processing_status] + model_gated_controls
+            )
 
             # Processing Controls
             process_keyframes_btn.click(
@@ -419,6 +457,32 @@ class MappingGradioInterface:
         except (TypeError, ValueError):
             pass
 
+    # Number of controls gated behind model selection (must match the
+    # ``model_gated_controls`` list built in create_interface()).
+    _NUM_GATED_CONTROLS = 10
+
+    def _select_model(self, model_name: str):
+        """Gate the Processing Control tab on the chosen reconstruction model.
+
+        Points the session's mapper at ``model_name`` and enables every gated
+        control; if the selection is cleared (or invalid) the controls are
+        re-disabled. Returns ``(processing_status, *gated-control-updates)`` in
+        the same order as ``model_gated_controls``.
+        """
+        disabled = [gr.update(interactive=False)] * self._NUM_GATED_CONTROLS
+        enabled = [gr.update(interactive=True)] * self._NUM_GATED_CONTROLS
+
+        if not model_name:
+            return ("Select a model above to begin", *disabled)
+
+        result = self.session.set_backbone(model_name)
+        if "error" in result:
+            return (f"⚠️ {result['error']}", *disabled)
+
+        label = next((m["label"] for m in self.session.available_backbones()
+                      if m["name"] == model_name), model_name)
+        return (f"Model: {label} — ready. Collect keyframes, then Process.", *enabled)
+
     def _process_keyframes(self, conf_threshold: float, mask_sky: bool, mask_dynamic: bool,
                            max_keyframes: int = constants.DEFAULT_MAX_KEYFRAMES
                            ) -> Tuple[str, str, str, int]:
@@ -454,8 +518,10 @@ class MappingGradioInterface:
             if results.get("success"):
                 glb_path = results["scene_results"].get("glb_path")
                 processing_time = results["timing"]["total_processing"]
+                backbone = results.get("backbone", "model")
                 status = f"Completed in {processing_time:.1f}s"
-                log_msg = f"VGGT processing completed in {processing_time:.1f}s. Model saved to {glb_path}"
+                log_msg = (f"{backbone} processing completed in {processing_time:.1f}s. "
+                           f"Model saved to {glb_path}")
                 self.processing_active = False
                 return glb_path, status, log_msg, keyframe_count
             else:

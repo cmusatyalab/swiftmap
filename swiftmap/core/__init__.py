@@ -14,13 +14,18 @@ Core functionality for the VGGT mapping system including:
 from swiftmap.core.session import MappingSession
 from swiftmap.core.tcp_server import MappingTCPServer
 from swiftmap.core.keyframe_selector import KeyframeSelector
-from swiftmap.core.vggt_mapper import VGGTMapper
+from swiftmap.core.mapper import (
+    BaseMapper, VGGTMapper, VGGTOmegaMapper, get_mapper, available_mappers)
 from swiftmap.core.nfn import NextFlightPlanner
 
 __all__ = [
     "MappingSession",
     "MappingTCPServer",
     "KeyframeSelector",
+    "BaseMapper",
     "VGGTMapper",
+    "VGGTOmegaMapper",
+    "get_mapper",
+    "available_mappers",
     "NextFlightPlanner",
 ]

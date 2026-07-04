@@ -7,6 +7,8 @@ Centralizes the values that were previously hardcoded in several modules so ther
 is a single place to tune them. Wire-protocol constants live in ``protocol.py``.
 """
 
+import os
+
 # --- Keyframe selection -----------------------------------------------------
 # Minimum mean optical-flow disparity (px) for a frame to be kept as a keyframe.
 DEFAULT_MIN_DISPARITY = 40.0
@@ -30,3 +32,12 @@ NFN_VISER_PORT = 7867  # Viser NFN viewer (opened on demand)
 VGGT_MODEL_URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
 SKYSEG_ONNX_URL = "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx"
 SKYSEG_ONNX_FILENAME = "skyseg.onnx"
+
+# --- VGGT-Omega -------------------------------------------------------------
+# Omega ships no weights on a hub; it loads from a local checkpoint (.pt) via
+# torch.load + load_state_dict. Point this at your checkpoint (env override
+# wins) and match the resolution to the checkpoint you use (512 -> ...512).
+VGGT_OMEGA_CHECKPOINT = os.environ.get(
+    "VGGT_OMEGA_CHECKPOINT",
+    "/home/ubuntu/xianglic/vggt-omega/checkpoints/vggt_omega_1b_512-002.pt")
+VGGT_OMEGA_IMAGE_RESOLUTION = int(os.environ.get("VGGT_OMEGA_IMAGE_RESOLUTION", "512"))

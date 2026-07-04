@@ -25,7 +25,8 @@ __version__ = "1.0.0"
 from swiftmap.core.session import MappingSession
 from swiftmap.core.tcp_server import MappingTCPServer
 from swiftmap.core.keyframe_selector import KeyframeSelector
-from swiftmap.core.vggt_mapper import VGGTMapper
+from swiftmap.core.mapper import (
+    BaseMapper, VGGTMapper, VGGTOmegaMapper, get_mapper, available_mappers)
 from swiftmap.frontend.gradio_interface import MappingGradioInterface
 
 # Keyframe selection helper
@@ -35,7 +36,11 @@ __all__ = [
     "MappingSession",
     "MappingTCPServer",
     "KeyframeSelector",
+    "BaseMapper",
     "VGGTMapper",
+    "VGGTOmegaMapper",
+    "get_mapper",
+    "available_mappers",
     "MappingGradioInterface",
     "FrameTracker"
 ]

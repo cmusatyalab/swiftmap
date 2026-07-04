@@ -1450,6 +1450,14 @@ dependencies = [
     { name = "viser" },
 ]
 
+[package.optional-dependencies]
+vggt = [
+    { name = "vggt" },
+]
+vggt-omega = [
+    { name = "vggt-omega" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "einops" },
@@ -1467,8 +1475,11 @@ requires-dist = [
     { name = "torch", specifier = "==2.3.1" },
     { name = "torchvision", specifier = "==0.18.1" },
     { name = "trimesh" },
+    { name = "vggt", marker = "extra == 'vggt'", git = "https://github.com/facebookresearch/vggt.git?rev=c3953fabdcc66fe52b578f27c59516d567416953" },
+    { name = "vggt-omega", marker = "extra == 'vggt-omega'", git = "https://github.com/facebookresearch/vggt-omega.git?rev=39a0cb8" },
     { name = "viser", specifier = "==0.2.23" },
 ]
+provides-extras = ["vggt", "vggt-omega"]
 
 [[package]]
 name = "sympy"
@@ -1729,6 +1740,32 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c4/1f/fa18009dea8469069cca78a4e877a008ab78f08b064bfc9ab891579077ff/uvicorn-0.49.0.tar.gz", hash = "sha256:ebf4271aa580d9de97f93192d4595176df6e91f9aae919ca73e4fc07df1e66a3", size = 91284, upload-time = "2026-06-03T22:01:30.448Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/fa/e1388bbcf24ef3274f45c0c1c7b501fd14971037c1b6ee23610553307497/uvicorn-0.49.0-py3-none-any.whl", hash = "sha256:ba3d14c3ee7e41c6c654c46c9eb489d33213cdd30aa1696eab1374337c13f68f", size = 71376, upload-time = "2026-06-03T22:01:29.037Z" },
+]
+
+[[package]]
+name = "vggt"
+version = "0.0.1"
+source = { git = "https://github.com/facebookresearch/vggt.git?rev=c3953fabdcc66fe52b578f27c59516d567416953#c3953fabdcc66fe52b578f27c59516d567416953" }
+dependencies = [
+    { name = "einops" },
+    { name = "huggingface-hub", version = "1.16.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "huggingface-hub", version = "1.19.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
+    { name = "numpy" },
+    { name = "opencv-python" },
+    { name = "pillow" },
+    { name = "safetensors" },
+]
+
+[[package]]
+name = "vggt-omega"
+version = "0.0.1"
+source = { git = "https://github.com/facebookresearch/vggt-omega.git?rev=39a0cb8#39a0cb8af88554f15ddcb5354cd52bde588fa014" }
+dependencies = [
+    { name = "einops" },
+    { name = "numpy" },
+    { name = "opencv-python" },
+    { name = "pillow" },
+    { name = "safetensors" },
 ]
 
 [[package]]

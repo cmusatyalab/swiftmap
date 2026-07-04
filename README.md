@@ -50,12 +50,17 @@ SwiftMap/
 │   ├── core/                # Domain logic
 │   │   ├── tcp_server.py            # TCP keyframe-collection server
 │   │   ├── keyframe_selector/       # optical-flow keyframe selection (+ frame_tracker)
-│   │   ├── vggt_mapper/             # VGGT inference + scene_export (GLB/PLY) + confidence map
+│   │   ├── mapper/                  # Pluggable reconstruction backbones:
+│   │   │                            #   base.py (BaseMapper) + registry + backends/{vggt,vggt_omega}
+│   │   │                            #   + shared postprocess / scene_export / confidence / geometry
 │   │   └── nfn/                     # Next Flight Navigation planner
 │   └── frontend/            # Gradio web UI, gradio compat shim, Viser viewer
-├── test/                    # test_client.py (streaming client)
-└── vggt/                    # Bundled VGGT model package
+└── test/                    # test_client.py (streaming client)
 ```
+
+The reconstruction models (VGGT, VGGT-Omega) are external packages installed
+into the environment, not vendored in-tree — see the optional dependencies in
+`pyproject.toml`.
 
 ---
 

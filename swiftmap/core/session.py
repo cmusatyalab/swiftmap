@@ -36,7 +36,7 @@ import numpy as np
 from swiftmap.core import constants, protocol
 from swiftmap.core.keyframe_selector import KeyframeSelector
 from swiftmap.core.tcp_server import MappingTCPServer
-from swiftmap.core.vggt_mapper import VGGTMapper
+from swiftmap.core.mapper import get_mapper, available_mappers, is_registered
 from swiftmap.core.nfn import NextFlightPlanner
 
 
@@ -52,7 +52,10 @@ class MappingSession:
         # Core stages (all long-lived; the model loads lazily on first reconstruct).
         self.selector = KeyframeSelector(min_disparity=min_disparity,
                                          visualize_flow=visualize_flow)
-        self.mapper = VGGTMapper()
+        # The reconstruction backbone is chosen at runtime (VGGT / VGGT-Omega /
+        # ...): no mapper exists until the user selects one via set_backbone().
+        self.backbone: Optional[str] = None
+        self.mapper = None
         self.planner = NextFlightPlanner()
 
         # Optional local->GPS alignment (set via calibrate_gps()).
@@ -305,8 +308,31 @@ class MappingSession:
         self.selector.configure_disparity_threshold(min_disparity)
 
     # =============================================================== mapping stage
+    def available_backbones(self) -> List[Dict[str, str]]:
+        """Registered reconstruction backbones (for the UI model picker)."""
+        return available_mappers()
+
+    def set_backbone(self, name: str) -> Dict[str, Any]:
+        """Select the reconstruction backbone by key (e.g. 'vggt', 'vggt_omega').
+
+        Instantiating a backbone is cheap (weights load lazily on first
+        reconstruct); switching to a different backbone drops the previous one
+        and its results. Re-selecting the current backbone is a no-op.
+        """
+        if not is_registered(name):
+            return {"error": f"Unknown model '{name}'."}
+        if self.backbone == name and self.mapper is not None:
+            return {"backbone": name, "changed": False}
+        self.mapper = get_mapper(name)
+        self.backbone = name
+        print(f"Reconstruction backbone set to: {name}")
+        return {"backbone": name, "changed": True}
+
     def reconstruct(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Run VGGT reconstruction on the retained keyframes (already <= the cap)."""
+        """Run reconstruction on the retained keyframes (already <= the cap)."""
+        if self.mapper is None:
+            return {"success": False, "error": "No model selected — choose a model first.",
+                    "keyframe_count": 0}
         self._drain()
         with self._paths_lock:
             entries = sorted(self._buffer, key=lambda e: e["seq"])
@@ -320,16 +346,18 @@ class MappingSession:
 
     def get_latest_results(self) -> Dict[str, Any]:
         """Latest reconstruction results (or {'error': ...} if none yet)."""
+        if self.mapper is None:
+            return {"error": "No model selected — choose a model first."}
         return self.mapper.get_latest_results()
 
     @property
     def latest_predictions(self) -> Optional[Dict[str, Any]]:
-        """The latest raw VGGT predictions, or None if nothing processed yet."""
-        return self.mapper.latest_predictions
+        """The latest raw predictions, or None if no model / nothing processed yet."""
+        return self.mapper.latest_predictions if self.mapper is not None else None
 
     def generate_confidence_map(self, conf_threshold: float) -> Dict[str, Any]:
         """(Re)generate the map-quality (confidence) point cloud from the latest run."""
-        latest = self.mapper.get_latest_results()
+        latest = self.get_latest_results()
         if "error" in latest:
             return {"error": "No VGGT processing results available. Process keyframes first."}
         if not latest.get("confidence_scene"):
@@ -348,9 +376,9 @@ class MappingSession:
 
         Returns the plan dict, or {'error': ...} if there's no usable reconstruction.
         """
-        latest = self.mapper.get_latest_results()
+        latest = self.get_latest_results()
         if "error" in latest:
-            return {"error": "No VGGT results yet — process keyframes first."}
+            return {"error": "No reconstruction yet — process keyframes first."}
         predictions = latest.get("predictions", {})
         if "world_points" not in predictions or "world_points_conf" not in predictions:
             return {"error": "Predictions have no world points — cannot run NFN."}
@@ -386,7 +414,7 @@ class MappingSession:
         """
         from swiftmap.core.geo_transform import geo
 
-        preds = self.mapper.latest_predictions
+        preds = self.latest_predictions
         if not preds or "camera_positions" not in preds:
             return {"error": "No reconstruction with camera poses yet — process keyframes first."}
 
@@ -422,7 +450,7 @@ class MappingSession:
         """
         from swiftmap.core.geo_transform import geo
 
-        preds = self.mapper.latest_predictions
+        preds = self.latest_predictions
         if not preds or "camera_positions" not in preds:
             return {"error": "No reconstruction with camera poses yet — process keyframes first."}
 
@@ -462,7 +490,7 @@ class MappingSession:
         paired with each frame (the ongoing trace). Returns the transform cfg (with a
         'mode' tag) or {'error': ...}.
         """
-        preds = self.mapper.latest_predictions
+        preds = self.latest_predictions
         if not preds or "camera_positions" not in preds:
             return {"error": "No reconstruction with camera poses yet — process keyframes first."}
 
@@ -492,7 +520,7 @@ class MappingSession:
 
     def _target_dir(self) -> str:
         """The current run's output directory (created if there isn't one yet)."""
-        latest = self.mapper.get_latest_results()
+        latest = self.get_latest_results()
         target_dir = latest.get("scene_results", {}).get("target_directory")
         if not target_dir:
             target_dir = f"input_stream_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -549,9 +577,9 @@ class MappingSession:
     # ================================================================ export stage
     def export_camera_poses(self) -> Optional[str]:
         """Write estimated camera poses to the run's output dir; return the path."""
-        if not self.mapper.latest_predictions:
+        if not self.latest_predictions:
             return None
-        latest = self.mapper.get_latest_results()
+        latest = self.get_latest_results()
         target_dir = latest.get("scene_results", {}).get("target_directory")
         if not target_dir:
             target_dir = f"input_stream_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
