@@ -21,7 +21,7 @@ import gradio as gr
 from swiftmap.frontend import _gradio_compat  # noqa: F401  (patches gradio_client schema parsing)
 import numpy as np
 from datetime import datetime
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # Add vggt root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -187,98 +187,92 @@ class MappingGradioInterface:
 
                 # Processing Control Tab
                 with gr.TabItem("⚙️ Processing Control"):
-                    # Model gate: the reconstruction backbone must be chosen before
-                    # anything else in this tab is usable. Every control below is
-                    # created disabled (grayed out) and only enabled once a model
-                    # is picked; all processing then runs on the chosen backbone.
-                    backbone_choices = [(m["label"], m["name"])
-                                        for m in self.session.available_backbones()]
-                    model_selector = gr.Radio(
-                        choices=backbone_choices,
-                        value=None,
-                        label="① Select reconstruction model",
-                        info=("Pick the model used for inference. All controls below "
-                              "stay disabled until you choose one; switching models "
-                              "clears the current reconstruction.")
-                    )
+                    # Model gate — choose the models first. Reconstruction controls
+                    # enable once a reconstruction model is picked; the segmentation
+                    # prompt enables once a segmentation model is picked. Everything
+                    # below starts disabled (grayed out).
+                    recon_choices = [(m["label"], m["name"])
+                                     for m in self.session.available_backbones()]
+                    seg_choices = [(m["label"], m["name"])
+                                   for m in self.session.available_segmenter_models()]
+                    with gr.Row():
+                        recon_selector = gr.Radio(
+                            choices=recon_choices, value=None,
+                            label="① Reconstruction model",
+                            info="Runs 3D Mapping / confidence / NFN. Switching clears the run.")
+                        seg_selector = gr.Radio(
+                            choices=seg_choices, value=None,
+                            label="① Segmentation model",
+                            info="Enables the text-prompt segmentation below.")
 
                     with gr.Row():
                         with gr.Column():
-                            # Processing parameters
                             conf_threshold_slider = gr.Slider(
-                                minimum=0,
-                                maximum=100,
-                                value=self.default_params["conf_threshold"],
-                                step=1,
-                                label="Confidence Threshold (%)",
-                                interactive=False
-                            )
-
+                                minimum=0, maximum=100,
+                                value=self.default_params["conf_threshold"], step=1,
+                                label="Confidence Threshold (%)", interactive=False)
                             mask_sky_checkbox = gr.Checkbox(
                                 value=self.default_params["mask_sky"],
-                                label="Filter Sky",
-                                interactive=False
-                            )
-
+                                label="Filter Sky", interactive=False)
                             mask_dynamic_checkbox = gr.Checkbox(
                                 value=self.default_params["mask_dynamic"],
-                                label="Filter Dynamic Objects",
-                                interactive=False
-                            )
+                                label="Filter Dynamic Objects", interactive=False)
 
-                            # GPS alignment source: either an uploaded GPS trace CSV,
-                            # or the live trace auto-filled here while a client streams
-                            # frames carrying GPS. Align so NFN viewpoints get lat/lon/alt.
+                            # Semantic segmentation prompt — shares the confidence
+                            # threshold above; the Segment button (right column) runs
+                            # it and the left viewer shows queried points red.
+                            seg_query_input = gr.Textbox(
+                                label="Segment query", placeholder="e.g. person",
+                                interactive=False)
+
+                            # GPS alignment source: uploaded CSV, or the live trace
+                            # auto-filled here while streaming GPS-tagged frames.
                             gps_csv_input = gr.File(
                                 label="GPS Trace CSV (auto-filled while streaming GPS)",
-                                file_types=[".csv"],
-                                interactive=False
-                            )
+                                file_types=[".csv"], interactive=False)
                             gps_method_radio = gr.Radio(
-                                choices=[GPS_NO_ICP, GPS_WITH_ICP],
-                                value=GPS_NO_ICP,
+                                choices=[GPS_NO_ICP, GPS_WITH_ICP], value=GPS_NO_ICP,
                                 label="GPS Alignment Method",
                                 info=("Without ICP needs GPS synced 1:1 with keyframes "
                                       "(paired stream, or a matching CSV). With ICP works "
                                       "from any GPS trajectory."),
-                                interactive=False
-                            )
+                                interactive=False)
                             gps_status = gr.Textbox(
-                                label="GPS Alignment",
-                                value="Not aligned",
-                                interactive=False
-                            )
+                                label="GPS Alignment", value="Not aligned", interactive=False)
 
                         with gr.Column():
-                            # Processing buttons (GPS calibrate sits with the rest).
-                            process_keyframes_btn = gr.Button("🔄 Process Keyframes", variant="primary", interactive=False)
+                            process_keyframes_btn = gr.Button("🔄 3D Mapping", variant="primary", interactive=False)
                             generate_confidence_btn = gr.Button("📊 Generate Confidence Map", variant="secondary", interactive=False)
+                            segment_btn = gr.Button("🔴 Segment", variant="secondary", interactive=False)
                             calibrate_gps_btn = gr.Button("🛰️ Calibrate GPS Alignment", variant="secondary", interactive=False)
                             analyze_nfn_btn = gr.Button("🧭 Analyze with NFN (opens new page)", variant="secondary", interactive=False)
-                            export_results_btn = gr.Button("💾 Export Results", variant="secondary", interactive=False)
 
-                            # Processing status
+                            # Selectable exports. Each option stays grayed until its
+                            # artifact exists (validity refreshed live by the timer).
+                            gr.Markdown("**Export**")
+                            export_poses_cb = gr.Checkbox(label="Camera poses (JSON)", value=False, interactive=False)
+                            export_nfn_cb = gr.Checkbox(label="NFN viewpoints (JSON + KML)", value=False, interactive=False)
+                            export_seg_cb = gr.Checkbox(label="Segmented objects (JSON + KML)", value=False, interactive=False)
+                            export_results_btn = gr.Button("💾 Export selected", variant="secondary", interactive=False)
+
                             processing_status = gr.Textbox(
                                 label="Processing Status",
-                                value="Select a model above to begin",
-                                interactive=False
-                            )
-
-                            # NFN result link / summary (opens the Viser viewer in a new page)
+                                value="Select a reconstruction model to begin", interactive=False)
                             nfn_link = gr.Markdown(
-                                "Select a model and run reconstruction first, then click "
+                                "Select a model and run **3D Mapping** first, then click "
                                 "**Analyze with NFN** to open the coverage-gap & viewpoint "
-                                "viewer in a new page."
-                            )
+                                "viewer in a new page.")
 
-                    # Controls gated behind model selection (order must match the
-                    # updates returned by _select_model).
-                    model_gated_controls = [
+                    # Gated groups (order must match the handler return order).
+                    recon_gated = [
                         conf_threshold_slider, mask_sky_checkbox, mask_dynamic_checkbox,
                         gps_csv_input, gps_method_radio,
                         process_keyframes_btn, generate_confidence_btn,
-                        calibrate_gps_btn, analyze_nfn_btn, export_results_btn,
+                        calibrate_gps_btn, analyze_nfn_btn,
                     ]
+                    seg_gated = [seg_query_input, segment_btn]
+                    export_controls = [export_poses_cb, export_nfn_cb, export_seg_cb,
+                                       export_results_btn]
                 
                 # Statistics Tab
                 with gr.TabItem("📈 Statistics & Info"):
@@ -326,12 +320,17 @@ class MappingGradioInterface:
                 fn=lambda without: gr.update(interactive=not without),
                 inputs=[keep_all_checkbox], outputs=[min_disparity_input])
 
-            # Model selection gate: enable/disable everything in the tab and point
-            # the session at the chosen backbone.
-            model_selector.change(
-                fn=self._select_model,
-                inputs=[model_selector],
-                outputs=[processing_status] + model_gated_controls
+            # Model gate: reconstruction selection enables the reconstruction
+            # controls; segmentation selection enables the segment prompt.
+            recon_selector.change(
+                fn=self._select_reconstruction,
+                inputs=[recon_selector],
+                outputs=[processing_status] + recon_gated
+            )
+            seg_selector.change(
+                fn=self._select_segmentation,
+                inputs=[seg_selector],
+                outputs=seg_gated
             )
 
             # Processing Controls
@@ -345,6 +344,14 @@ class MappingGradioInterface:
                 fn=self._generate_confidence_map,
                 inputs=[conf_threshold_slider],
                 outputs=[confidence_viewer, processing_log]
+            )
+
+            # Semantic segmentation: render the queried objects (red) in the left
+            # viewer, replacing the plain reconstruction with the highlighted cloud.
+            segment_btn.click(
+                fn=self._segment,
+                inputs=[seg_query_input, conf_threshold_slider],
+                outputs=[model_viewer, processing_status, processing_log]
             )
 
             calibrate_gps_btn.click(
@@ -361,16 +368,18 @@ class MappingGradioInterface:
 
             export_results_btn.click(
                 fn=self._export_results,
+                inputs=[export_poses_cb, export_nfn_cb, export_seg_cb],
                 outputs=[processing_status, processing_log]
             )
-            
-            # Auto-refresh: keyframe count, stats, optical-flow preview, and the
-            # live GPS trace file box.
+
+            # Auto-refresh: keyframe count, stats, optical-flow preview, the live GPS
+            # trace file box, and the validity (enabled/disabled) of export options.
             keyframe_count_refresh = gr.Timer(value=2.0)
             keyframe_count_refresh.tick(
                 fn=self._update_ui,
                 inputs=[gps_csv_input],
                 outputs=[keyframe_count, stats_display, flow_preview, gps_csv_input]
+                        + export_controls
             )
 
         return interface
@@ -457,31 +466,57 @@ class MappingGradioInterface:
         except (TypeError, ValueError):
             pass
 
-    # Number of controls gated behind model selection (must match the
-    # ``model_gated_controls`` list built in create_interface()).
-    _NUM_GATED_CONTROLS = 10
+    # Sizes of the two gated groups (must match recon_gated / seg_gated in
+    # create_interface()).
+    _NUM_RECON_GATED = 9
+    _NUM_SEG_GATED = 2
 
-    def _select_model(self, model_name: str):
-        """Gate the Processing Control tab on the chosen reconstruction model.
+    def _select_reconstruction(self, model_name: str):
+        """Gate the reconstruction controls on the chosen reconstruction model.
 
-        Points the session's mapper at ``model_name`` and enables every gated
-        control; if the selection is cleared (or invalid) the controls are
-        re-disabled. Returns ``(processing_status, *gated-control-updates)`` in
-        the same order as ``model_gated_controls``.
+        Returns ``(processing_status, *recon_gated-updates)``.
         """
-        disabled = [gr.update(interactive=False)] * self._NUM_GATED_CONTROLS
-        enabled = [gr.update(interactive=True)] * self._NUM_GATED_CONTROLS
-
+        disabled = [gr.update(interactive=False)] * self._NUM_RECON_GATED
+        enabled = [gr.update(interactive=True)] * self._NUM_RECON_GATED
         if not model_name:
-            return ("Select a model above to begin", *disabled)
-
+            return ("Select a reconstruction model to begin", *disabled)
         result = self.session.set_backbone(model_name)
         if "error" in result:
             return (f"⚠️ {result['error']}", *disabled)
-
         label = next((m["label"] for m in self.session.available_backbones()
                       if m["name"] == model_name), model_name)
-        return (f"Model: {label} — ready. Collect keyframes, then Process.", *enabled)
+        return (f"Model: {label} — ready. Collect keyframes, then 3D Mapping.", *enabled)
+
+    def _select_segmentation(self, model_name: str):
+        """Gate the segmentation prompt on the chosen segmentation model.
+
+        Returns updates for ``seg_gated`` (seg query box, Segment button).
+        """
+        if not model_name:
+            return [gr.update(interactive=False)] * self._NUM_SEG_GATED
+        result = self.session.set_segmenter(model_name)
+        enabled = "error" not in result
+        return [gr.update(interactive=enabled)] * self._NUM_SEG_GATED
+
+    def _segment(self, query: str, conf_threshold: float) -> Tuple[Optional[str], str, str]:
+        """Run SAM 3 segmentation and show the highlighted (red) cloud on the left.
+
+        Uses the same confidence threshold as reconstruction so the segmented
+        points match the displayed cloud. Returns
+        (segmented_glb_for_model_viewer, processing_status, log).
+        """
+        try:
+            res = self.session.segment(query, conf_threshold=float(conf_threshold))
+            if res.get("success"):
+                tag = " (GPS-tagged)" if res.get("gps_aligned") else " — calibrate GPS to geotag objects"
+                status = f"Segmented '{res['query']}': {res['num_objects']} object(s)"
+                log = (f"Segmentation: '{res['query']}' @ conf>={res['conf_threshold']:.0f}% -> "
+                       f"{res['num_points']} points, {res['num_objects']} object(s){tag}. "
+                       f"Run NFN/Export to write per-object GPS.")
+                return res.get("glb_path"), status, log
+            return None, "Segmentation failed", res.get("error", "Unknown error")
+        except Exception as e:
+            return None, "Error", f"Segmentation error: {e}"
 
     def _process_keyframes(self, conf_threshold: float, mask_sky: bool, mask_dynamic: bool,
                            max_keyframes: int = constants.DEFAULT_MAX_KEYFRAMES
@@ -676,32 +711,30 @@ class MappingGradioInterface:
         except Exception as e:
             return f"❌ NFN failed: {e}", f"NFN error: {e}"
 
-    def _export_results(self) -> Tuple[str, str]:
-        """Export processing results. Returns (status, log): a short status for the
-        button's status box and the detailed file list for the log."""
+    def _export_results(self, want_poses: bool, want_nfn: bool,
+                        want_seg: bool) -> Tuple[str, str]:
+        """Export the selected artifacts. Returns (status, detailed file log)."""
         try:
-            if not self.session.latest_predictions:
-                return "⚠️ Nothing to export", "No results to export. Process keyframes first."
+            if not any([want_poses, want_nfn, want_seg]):
+                return "⚠️ Nothing selected", "Select at least one export option."
 
             msgs, items, out_dir = [], [], None
-            poses_path = self.session.export_camera_poses()
-            if poses_path:
-                msgs.append(f"Camera poses → {poses_path}")
-                items.append("camera poses")
-                out_dir = os.path.dirname(poses_path)
-            else:
-                msgs.append("Failed to export camera poses")
+            targets = []
+            if want_poses:
+                targets.append(("camera poses", self.session.export_camera_poses, "process keyframes first"))
+            if want_nfn:
+                targets.append(("NFN viewpoints", self.session.export_nfn_plan, "run NFN first"))
+            if want_seg:
+                targets.append(("segmented objects", self.session.export_segmented_objects, "run Segment first"))
 
-            # NFN plan (+ transform.json + KML if GPS-aligned), if NFN has been run.
-            nfn_path = self.session.export_nfn_plan()
-            if nfn_path:
-                msgs.append(f"NFN viewpoints → {nfn_path}")
-                items.append("NFN viewpoints")
-                out_dir = os.path.dirname(nfn_path)
-                if self.session.gps_transform is not None:
-                    msgs.append("GPS transform → transform.json")
-                    msgs.append("Targets KML (Google My Maps) → next_flight_viewpoints.kml")
-                    items += ["GPS transform", "targets KML"]
+            for label, export_fn, hint in targets:
+                path = export_fn()
+                if path:
+                    msgs.append(f"{label} → {path}")
+                    items.append(label)
+                    out_dir = os.path.dirname(path)
+                else:
+                    msgs.append(f"{label}: nothing to export ({hint})")
 
             if not items:
                 return "⚠️ Nothing was exported", "\n".join(msgs)
@@ -712,7 +745,8 @@ class MappingGradioInterface:
             return "❌ Export failed", f"Error exporting results: {str(e)}"
     
     def _update_ui(self, current_gps_file):
-        """Timer tick: refresh keyframe count, stats, flow preview, and GPS file box.
+        """Timer tick: refresh keyframe count, stats, flow preview, GPS file box,
+        and the validity (enabled state) of the export options.
 
         Returns gr.update() where nothing should change so we neither clear the
         optical-flow image when viz is off nor fight a user's uploaded CSV.
@@ -734,7 +768,22 @@ class MappingGradioInterface:
         if stream_csv and not user_uploaded and cur != stream_csv:
             gps_out = stream_csv
 
-        return keyframe_count, stats, flow_out, gps_out
+        return (keyframe_count, stats, flow_out, gps_out, *self._export_option_updates())
+
+    def _export_option_updates(self):
+        """Enable each export option only once its artifact exists; else grey it out
+        (and uncheck). Order: camera poses, NFN viewpoints, segmented objects, button."""
+        s = self.session
+        poses_ok = bool(s and s.latest_predictions is not None)
+        nfn_ok = bool(s and s.latest_plan is not None)
+        seg_ok = bool(s and s.latest_segmentation is not None)
+
+        def opt(valid):
+            # Enable (preserve the user's check) when valid; grey out + uncheck when not.
+            return gr.update(interactive=True) if valid else gr.update(interactive=False, value=False)
+
+        return (opt(poses_ok), opt(nfn_ok), opt(seg_ok),
+                gr.update(interactive=(poses_ok or nfn_ok or seg_ok)))
 
     def _update_statistics(self) -> Tuple[int, Dict]:
         """

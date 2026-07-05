@@ -51,6 +51,13 @@ vggt = [
 vggt-omega = [
     "vggt-omega @ git+https://github.com/facebookresearch/vggt-omega.git@39a0cb8",
 ]
+# Text-promptable semantic segmentation (SAM 3). Note: SAM 3 imports pkg_resources,
+# so setuptools must stay <81 until upstream drops it.
+sam3 = [
+    "sam3 @ git+https://github.com/facebookresearch/sam3.git",
+    "setuptools<81",
+    "pycocotools",
+]
 
 [tool.uv]
 # This repo is run from its own root and imports the `swiftmap` package via the

@@ -37,6 +37,7 @@ from swiftmap.core import constants, protocol
 from swiftmap.core.keyframe_selector import KeyframeSelector
 from swiftmap.core.tcp_server import MappingTCPServer
 from swiftmap.core.mapper import get_mapper, available_mappers, is_registered
+from swiftmap.core.semantic import get_segmenter, available_segmenters, lift
 from swiftmap.core.nfn import NextFlightPlanner
 
 
@@ -57,6 +58,11 @@ class MappingSession:
         self.backbone: Optional[str] = None
         self.mapper = None
         self.planner = NextFlightPlanner()
+
+        # Text-promptable segmentation (SAM 3), built lazily on first segment().
+        self.segmenter = None
+        # Latest segmentation result: {query, masks, points, objects, glb_path, ...}
+        self.latest_segmentation = None
 
         # Optional local->GPS alignment (set via calibrate_gps()).
         self.gps_transform = None
@@ -328,6 +334,21 @@ class MappingSession:
         print(f"Reconstruction backbone set to: {name}")
         return {"backbone": name, "changed": True}
 
+    def available_segmenter_models(self) -> List[Dict[str, str]]:
+        """Registered segmentation backends (for the UI model picker)."""
+        return available_segmenters()
+
+    def set_segmenter(self, name: str) -> Dict[str, Any]:
+        """Select the segmentation backend by key (e.g. 'sam3'); built lazily."""
+        from swiftmap.core.semantic import is_registered as seg_registered
+        if not seg_registered(name):
+            return {"error": f"Unknown segmentation model '{name}'."}
+        if getattr(self.segmenter, "name", None) == name:
+            return {"segmenter": name, "changed": False}
+        self.segmenter = get_segmenter(name)
+        print(f"Segmentation model set to: {name}")
+        return {"segmenter": name, "changed": True}
+
     def reconstruct(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Run reconstruction on the retained keyframes (already <= the cap)."""
         if self.mapper is None:
@@ -368,6 +389,73 @@ class MappingSession:
         params = {"conf_threshold": float(conf_threshold)}
         return self.mapper._generate_confidence_mapping(
             latest["predictions"], params, target_dir)
+
+    # ============================================================== semantic stage
+    def segment(self, query: str, conf_threshold: Optional[float] = None,
+                segmenter_name: Optional[str] = None) -> Dict[str, Any]:
+        """Text-promptable segmentation over the latest reconstruction.
+
+        Runs the segmenter (SAM 3) on VGGT's internal frames, reprojects masks to
+        3D via ``world_points``, writes a highlight GLB (queried points in red)
+        into the run dir, and spatially clusters the segmented points into objects
+        (with GPS centroids when the scene is GPS-aligned). Result is cached on
+        ``self.latest_segmentation`` and folded into the NFN export.
+
+        ``conf_threshold`` is the confidence percentile cut (same as the
+        Processing-Control slider); defaults to the value used for the last
+        reconstruction so the segmented points match what the viewer shows.
+        """
+        query = (query or "").strip()
+        if not query:
+            return {"error": "Enter a segmentation query (e.g. 'person')."}
+        preds = self.latest_predictions
+        if not preds or "world_points" not in preds or "images" not in preds:
+            return {"error": "No reconstruction to segment — process keyframes first."}
+
+        if conf_threshold is None:
+            info = self.mapper.latest_keyframes_info or {}
+            conf_threshold = info.get("processing_params", {}).get(
+                "conf_threshold", constants.DEFAULT_CONF_THRESHOLD)
+
+        name = segmenter_name or constants.DEFAULT_SEGMENTER
+        if self.segmenter is None or getattr(self.segmenter, "name", None) != name:
+            self.segmenter = get_segmenter(name)
+
+        images = lift.frame_images(preds)
+        masks = self.segmenter.segment(images, query)
+        if masks is None:
+            return {"error": "Segmentation model failed to initialize."}
+
+        target_dir = self._target_dir()
+        glb_path = lift.export_highlight_glb(preds, masks, query, target_dir,
+                                                  conf_thres=conf_threshold)
+        pts, _ = lift.masks_to_points(preds, masks, conf_thres=conf_threshold)
+
+        # Scene diagonal -> scale-invariant clustering radius.
+        wp = np.asarray(preds["world_points"]).reshape(-1, 3)
+        wp = wp[np.isfinite(wp).all(1)]
+        diag = float(np.linalg.norm(wp.max(0) - wp.min(0))) if len(wp) else 1.0
+        objects = lift.cluster_objects(pts, diag)
+
+        # Attach a GPS centroid to each object when the scene is aligned.
+        for i, o in enumerate(objects):
+            o["id"] = i
+            gps = self.to_gps(o["centroid"])
+            o["centroid_gps"] = gps.tolist() if gps is not None else None
+
+        self.latest_segmentation = {
+            "query": query, "masks": masks, "points": pts, "objects": objects,
+            "glb_path": glb_path, "target_dir": target_dir, "segmenter": name,
+            "conf_threshold": float(conf_threshold),
+        }
+        print(f"Segmented '{query}' (conf>={conf_threshold}): "
+              f"{len(pts)} points -> {len(objects)} object(s)")
+        return {
+            "success": True, "query": query, "glb_path": glb_path,
+            "conf_threshold": float(conf_threshold),
+            "num_points": int(len(pts)), "num_objects": len(objects),
+            "objects": objects, "gps_aligned": self.gps_transform is not None,
+        }
 
     # ============================================================== planning stage
     def plan(self, low_percentile: float = 60.0,
@@ -560,6 +648,16 @@ class MappingSession:
             "gps_aligned": self.gps_transform is not None,
             "viewpoints": viewpoints,
         }
+
+        # Extra section: one GPS point per segmented object, folded into the plan.
+        seg_items = self._segmented_object_items()
+        if seg_items:
+            out["segmented_objects"] = {
+                "query": self.latest_segmentation.get("query"),
+                "num_objects": len(seg_items),
+                "objects": seg_items,
+            }
+
         path = os.path.join(target_dir, "next_flight_viewpoints.json")
         with open(path, "w") as f:
             json.dump(out, f, indent=2)
@@ -575,6 +673,60 @@ class MappingSession:
         return path
 
     # ================================================================ export stage
+    def _segmented_object_items(self) -> List[Dict[str, Any]]:
+        """Serializable per-object records for the latest segmentation.
+
+        GPS is recomputed against the current alignment so it stays fresh even if
+        the scene was GPS-calibrated after segmenting. Empty if no segmentation.
+        """
+        seg = self.latest_segmentation
+        if not seg or not seg.get("objects"):
+            return []
+        items = []
+        for o in seg["objects"]:
+            item = {
+                "id": int(o.get("id", 0)),
+                "position": np.asarray(o["centroid"], dtype=float).tolist(),
+                "num_points": int(o.get("num_points", 0)),
+                "radius": float(o.get("radius", 0.0)),
+            }
+            gps = self.to_gps(o["centroid"])
+            if gps is not None:
+                item["position_gps"] = gps.tolist()  # [lat, lon, alt]
+            items.append(item)
+        return items
+
+    def export_segmented_objects(self) -> Optional[str]:
+        """Write ``segmented_objects.json`` (+ KML when aligned) to the run dir.
+
+        Standalone counterpart to the segmented section of the NFN plan, so the
+        objects can be exported without running NFN. Returns the path, or None if
+        there is no segmentation yet.
+        """
+        seg = self.latest_segmentation
+        items = self._segmented_object_items()
+        if not items:
+            return None
+        import json
+        target_dir = seg.get("target_dir") or self._target_dir()
+        out = {
+            "query": seg.get("query"),
+            "conf_threshold": seg.get("conf_threshold"),
+            "gps_aligned": self.gps_transform is not None,
+            "num_objects": len(items),
+            "objects": items,
+        }
+        path = os.path.join(target_dir, "segmented_objects.json")
+        with open(path, "w") as f:
+            json.dump(out, f, indent=2)
+        gps_items = [s for s in items if "position_gps" in s]
+        if gps_items:
+            from swiftmap.core.nfn import kml
+            kml.write_kml(gps_items, os.path.join(target_dir, "segmented_objects.kml"),
+                          gps_key="position_gps",
+                          doc_name=f"SwiftMap Segmented: {seg.get('query')}")
+        return path
+
     def export_camera_poses(self) -> Optional[str]:
         """Write estimated camera poses to the run's output dir; return the path."""
         if not self.latest_predictions:

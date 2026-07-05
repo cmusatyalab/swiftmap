@@ -41,3 +41,25 @@ VGGT_OMEGA_CHECKPOINT = os.environ.get(
     "VGGT_OMEGA_CHECKPOINT",
     "/home/ubuntu/xianglic/vggt-omega/checkpoints/vggt_omega_1b_512-002.pt")
 VGGT_OMEGA_IMAGE_RESOLUTION = int(os.environ.get("VGGT_OMEGA_IMAGE_RESOLUTION", "512"))
+
+# --- Semantic segmentation (SAM 3) -----------------------------------------
+# Text-promptable segmentation over the frames VGGT reconstructed, reprojected
+# to 3D via the (pixel-aligned) world-point map. Weights: point SAM3_CHECKPOINT
+# at a local .pt (env override wins); if empty/missing, the SAM 3 builder falls
+# back to downloading facebook/sam3 from the HuggingFace Hub.
+SAM3_CHECKPOINT = os.environ.get("SAM3_CHECKPOINT", "")  # "" -> download from HF
+# BPE tokenizer vocab shipped in the SAM 3 repo assets (needed by the text encoder).
+SAM3_BPE_PATH = os.environ.get(
+    "SAM3_BPE_PATH",
+    "/home/ubuntu/xianglic/sam3/assets/bpe_simple_vocab_16e6.txt.gz")
+# Minimum SAM 3 instance confidence to keep a mask.
+SAM3_CONF_THRESHOLD = float(os.environ.get("SAM3_CONF_THRESHOLD", "0.5"))
+# Default segmentation backend (registered in swiftmap.core.semantic).
+DEFAULT_SEGMENTER = os.environ.get("SWIFTMAP_SEGMENTER", "sam3")
+
+# --- Segmented-object clustering (v1: spatial) -----------------------------
+# Segmented 3D points are clustered into objects by spatial density (DBSCAN-like
+# over a KD-tree). eps is expressed as a fraction of the scene diagonal so it is
+# scale-invariant across reconstructions.
+SEG_CLUSTER_EPS_FRACTION = float(os.environ.get("SEG_CLUSTER_EPS_FRACTION", "0.02"))
+SEG_CLUSTER_MIN_POINTS = int(os.environ.get("SEG_CLUSTER_MIN_POINTS", "20"))
