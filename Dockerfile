@@ -37,13 +37,12 @@ RUN python -m pip install --no-cache-dir --upgrade pip "setuptools<81" wheel && 
 COPY . .
 
 # Model weights are supplied at run time (not baked into the image):
-#   * VGGT  + SAM 3 download from HuggingFace on first use — mount a volume at
+#   * VGGT + SAM 3 download from HuggingFace on first use to the default caches
+#     (/root/.cache/torch and /root/.cache/huggingface) — mount a volume at
 #     /root/.cache to persist them across restarts (download-once).
 #   * VGGT-Omega has no public download — mount its checkpoint at /app/checkpoints
 #     and point VGGT_OMEGA_CHECKPOINT at it.
-ENV HF_HOME=/root/.cache/huggingface \
-    TORCH_HOME=/root/.cache/torch \
-    SWIFTMAP_OUTPUT_DIR=/app/output \
+ENV SWIFTMAP_OUTPUT_DIR=/app/output \
     PYTHONUNBUFFERED=1
 
 EXPOSE 43322 7866

@@ -19,7 +19,6 @@ Config is read from env vars (below), overridable by CLI flags:
     SWIFTMAP_CONF_THRESHOLD  confidence percentile     (default 60)
     SWIFTMAP_MASK_SKY        true|false                (default true)
     SWIFTMAP_KEEP_ALL        keep every frame          (default false)
-    SWIFTMAP_CONTINUOUS      map repeated batches      (default true)
     SWIFTMAP_OUTPUT_DIR      export dir (mount this)   (default output)
     SWIFTMAP_VIEWER_PORT     viewer web port           (default 7866)
 
@@ -68,8 +67,6 @@ def main() -> int:
     p.add_argument("--mask-sky", type=lambda s: str(s).lower() in ("1", "true", "yes", "on"),
                    default=_env_bool("SWIFTMAP_MASK_SKY", True))
     p.add_argument("--keep-all", action="store_true", default=_env_bool("SWIFTMAP_KEEP_ALL", False))
-    p.add_argument("--continuous", type=lambda s: str(s).lower() in ("1", "true", "yes", "on"),
-                   default=_env_bool("SWIFTMAP_CONTINUOUS", True))
     p.add_argument("--output-dir", default=_env("SWIFTMAP_OUTPUT_DIR", "output"))
     p.add_argument("--viewer-host", default=_env("SWIFTMAP_VIEWER_HOST", "0.0.0.0"))
     p.add_argument("--viewer-port", type=int,
@@ -82,7 +79,7 @@ def main() -> int:
         max_keyframes=args.max_keyframes,
         conf_threshold=args.conf_threshold,
         mask_sky=args.mask_sky, keep_all=args.keep_all,
-        continuous=args.continuous, output_dir=args.output_dir,
+        output_dir=args.output_dir,
         viewer_host=args.viewer_host, viewer_port=args.viewer_port,
     )
     AutoMappingServer(cfg).run()

@@ -48,7 +48,6 @@ class ServerConfig:
     mask_dynamic: bool = False
     keep_all: bool = False                 # keep every frame (skip disparity selection)
     min_disparity: float = constants.DEFAULT_MIN_DISPARITY
-    continuous: bool = True                # after a run, clear and map the next batch
     output_dir: str = "output"             # working dir for exports (mount this)
     poll_interval: float = 1.0             # seconds between cap checks
     # Results viewer (Gradio) — always started: shows each run's reconstruction /
@@ -87,8 +86,7 @@ class AutoMappingServer:
         """Start collecting and block, running the pipeline whenever the cap fills."""
         print(f"[swiftmap-server] starting on {self.cfg.host}:{self.cfg.port}")
         print(f"[swiftmap-server] site={self.cfg.site} backbone={self.cfg.backbone} "
-              f"segmenter={self.cfg.segmenter} cap={self.cfg.max_keyframes} "
-              f"continuous={self.cfg.continuous}")
+              f"segmenter={self.cfg.segmenter} cap={self.cfg.max_keyframes}")
         print(f"[swiftmap-server] areas -> {self._root}")
 
         if not self.session.start(port=self.cfg.port, keep_all=self.cfg.keep_all):
@@ -109,9 +107,6 @@ class AutoMappingServer:
             count = self.session.get_keyframe_count()
             if not self._processing and count >= self.cfg.max_keyframes:
                 self._run_pipeline()
-                if not self.cfg.continuous:
-                    print("[swiftmap-server] one-shot mode: pipeline done, idling.")
-                    break
             time.sleep(self.cfg.poll_interval)
 
     # ---------------------------------------------------------------- pipeline
@@ -191,8 +186,7 @@ class AutoMappingServer:
             print(f"[swiftmap-server] run #{run} pipeline error: {e}")
             traceback.print_exc()
         finally:
-            if self.cfg.continuous:
-                self.session.clear_keyframes()   # fresh batch for the next area
+            self.session.clear_keyframes()   # always start a fresh batch for the next area
             self._processing = False
 
     @staticmethod
