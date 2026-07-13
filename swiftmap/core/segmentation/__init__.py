@@ -9,12 +9,12 @@ Public API:
     BaseSegmenter, register_segmenter, get_segmenter, available_segmenters
     lift: frame_images, masks_to_points, export_highlight_glb, cluster_objects
 """
-from swiftmap.core.semantic.base import BaseSegmenter
-from swiftmap.core.semantic.registry import (
+from swiftmap.core.segmentation.base import BaseSegmenter
+from swiftmap.core.segmentation.registry import (
     register_segmenter, get_segmenter, available_segmenters, is_registered)
-from swiftmap.core.semantic import lift
+from swiftmap.core.segmentation import lift
 # Importing the backends registers them.
-from swiftmap.core.semantic.backends import SAM3Segmenter
+from swiftmap.core.segmentation.backends import SAM3Segmenter
 
 __all__ = [
     "BaseSegmenter",

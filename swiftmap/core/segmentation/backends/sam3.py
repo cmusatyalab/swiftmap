@@ -20,8 +20,8 @@ import numpy as np
 import torch
 
 from swiftmap.core import constants
-from swiftmap.core.semantic.base import BaseSegmenter
-from swiftmap.core.semantic.registry import register_segmenter
+from swiftmap.core.segmentation.base import BaseSegmenter
+from swiftmap.core.segmentation.registry import register_segmenter
 
 
 @register_segmenter(

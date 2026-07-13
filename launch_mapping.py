@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (C) 2024 Carnegie Mellon University
 """
-SwiftMap Launch Script
+SwiftMap GUI launcher.
 
-Main entry point for the SwiftMap drone mapping system. Starts the Gradio web
-interface, which embeds the TCP keyframe-collection server and the VGGT mapping
-pipeline.
+Starts the Gradio web interface, which embeds the TCP frame+GPS collection server
+and the full mapping pipeline (reconstruction, confidence, NFN, segmentation). For
+the headless, auto-running server, use ``launch_server.py`` instead.
 
 Usage:
     python launch_mapping.py                         # default (http://localhost:7866)
@@ -17,7 +17,7 @@ import os
 import sys
 import argparse
 
-# Add the repo root to path so the `swiftmap` and `vggt` packages resolve
+# Add the repo root to path so the `swiftmap` package resolves.
 repo_root = os.path.dirname(os.path.abspath(__file__))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
@@ -29,16 +29,9 @@ from swiftmap.frontend.gradio_interface import MappingGradioInterface
 def print_banner():
     """Print system banner."""
     print("=" * 70)
-    print("🚁 SwiftMap Mapping System")
-    print("=" * 70)
-    print("Real-time drone mapping with keyframe selection and 3D reconstruction")
-    print("")
-    print("Key Features:")
-    print(f"  • TCP image reception on port {protocol.TCP_PORT}")
-    print("  • Optical flow-based keyframe selection")
-    print("  • VGGT 3D reconstruction inference")
-    print("  • Dual visualization (3D model + confidence mapping)")
-    print("  • Compatible with the bundled test client (test/test_client.py)")
+    print("🚁 SwiftMap — AI-in-the-loop drone mapping (GUI)")
+    print(f"   TCP frame+GPS ingest on port {protocol.TCP_PORT} | test client: test/test_client.py")
+    print("   Reconstruction (VGGT / VGGT-Omega) · confidence · NFN · SAM 3 segmentation")
     print("=" * 70)
     print("")
 

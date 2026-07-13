@@ -1,13 +1,12 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
 """
-SwiftMap Mapping Core Components
+SwiftMap core components:
 
-Core functionality for the VGGT mapping system including:
-- Mapping session orchestrator (TCP transport + keyframe selection)
-- TCP server for drone image reception
-- Keyframe selection based on optical flow
-- VGGT inference engine for 3D mapping
+- Mapping session orchestrator (TCP transport + keyframe selection + backbones)
+- TCP server for drone frame+GPS reception
+- Optical-flow keyframe selection
+- Pluggable reconstruction backbones (VGGT / VGGT-Omega)
 - Next Flight Navigation (NFN) planning
 """
 

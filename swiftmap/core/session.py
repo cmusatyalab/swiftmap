@@ -37,7 +37,7 @@ from swiftmap.core import constants, protocol
 from swiftmap.core.keyframe_selector import KeyframeSelector
 from swiftmap.core.tcp_server import MappingTCPServer
 from swiftmap.core.mapper import get_mapper, available_mappers, is_registered
-from swiftmap.core.semantic import get_segmenter, available_segmenters, lift
+from swiftmap.core.segmentation import get_segmenter, available_segmenters, lift
 from swiftmap.core.nfn import NextFlightPlanner
 
 
@@ -340,7 +340,7 @@ class MappingSession:
 
     def set_segmenter(self, name: str) -> Dict[str, Any]:
         """Select the segmentation backend by key (e.g. 'sam3'); built lazily."""
-        from swiftmap.core.semantic import is_registered as seg_registered
+        from swiftmap.core.segmentation import is_registered as seg_registered
         if not seg_registered(name):
             return {"error": f"Unknown segmentation model '{name}'."}
         if getattr(self.segmenter, "name", None) == name:
@@ -665,10 +665,14 @@ class MappingSession:
         if self.gps_transform is not None:
             with open(os.path.join(target_dir, "transform.json"), "w") as f:
                 json.dump(self.gps_transform.cfg, f, indent=2)
-            # KML of the target (ground) GPS, ready to import into Google My Maps.
+            # KML of the target (ground) GPS, ready to import into Google My Maps:
+            # point pins, plus a polygon (area) layer whose ring vertices are the
+            # target points.
             from swiftmap.core.nfn import kml
             kml.write_kml(viewpoints, os.path.join(target_dir, "next_flight_viewpoints.kml"),
                           gps_key="target_gps", doc_name="SwiftMap NFN Targets")
+            kml.write_polygon_kml(viewpoints, os.path.join(target_dir, "next_flight_area.kml"),
+                                  gps_key="target_gps", doc_name="SwiftMap NFN Area")
 
         return path
 

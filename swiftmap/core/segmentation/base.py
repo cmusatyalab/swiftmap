@@ -6,7 +6,7 @@ A ``BaseSegmenter`` takes the frames a reconstruction backbone actually ran on
 (VGGT's internal, resized images — pixel-aligned with its world-point map) plus a
 text query like ``"person"`` and returns a per-frame boolean mask. Because the
 masks live on the same (H, W) grid as ``world_points``, turning a mask into 3D
-points is a direct index (see ``semantic.lift``) — no camera projection.
+points is a direct index (see ``segmentation.lift``) — no camera projection.
 
 Concrete backends (e.g. SAM 3) implement ``initialize_model`` and
 ``_segment_image``; the base class handles lazy init and the per-frame loop.

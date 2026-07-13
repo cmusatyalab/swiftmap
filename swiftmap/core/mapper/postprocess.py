@@ -89,8 +89,9 @@ def generate_3d_content(predictions: Dict[str, Any],
     try:
         print("Generating 3D content...")
 
+        # Run dir: caller-provided name (e.g. an area tag) or the default timestamp.
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        target_dir = f"input_stream_{timestamp}"
+        target_dir = params.get("output_name") or f"input_stream_{timestamp}"
         target_dir_images = os.path.join(target_dir, "images")
         os.makedirs(target_dir_images, exist_ok=True)
         print(f"Created target directory: {target_dir}")

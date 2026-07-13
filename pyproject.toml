@@ -1,7 +1,7 @@
 [project]
 name = "swiftmap"
 version = "0.1.0"
-description = "AI-in-the-loop iterative drone mapping (VGGT) with Next Flight Navigation"
+description = "AI-in-the-loop iterative drone mapping (VGGT / VGGT-Omega) with segmentation and Next Flight Navigation"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
 license = { text = "GPL-2.0-only" }

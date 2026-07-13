@@ -1,18 +1,12 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
 """
-Gradio Interface for SwiftMap Mapping System
+Gradio web GUI for SwiftMap.
 
-Web-based interface for the VGGT mapping system featuring:
-- TCP server controls for keyframe collection
-- Dual 3D viewers (reconstruction + confidence mapping)
-- Real-time statistics and monitoring
-- Processing controls and parameter adjustment
-
-Layout:
-- No upload interface (processes TCP-collected images)
-- Large dual 3D viewers side by side
-- All controls positioned below the viewers
+Two 3D viewers on top (reconstruction + confidence map) and control tabs below:
+keyframe collection, model selection (reconstruction + segmentation), processing
+(3D mapping, confidence, segmentation, GPS, NFN), selectable exports, and stats.
+Processes TCP-collected frames — there is no image-upload widget.
 """
 
 import os
@@ -38,10 +32,8 @@ GPS_NO_ICP = "Without ICP — GPS synced 1:1 with keyframes"
 
 
 class MappingGradioInterface:
-    """
-    Gradio web interface for VGGT mapping system.
-    """
-    
+    """Gradio web GUI for SwiftMap (wraps a MappingSession)."""
+
     def __init__(self, host: str = "0.0.0.0", port: int = constants.GUI_PORT):
         """
         Initialize the Gradio interface.

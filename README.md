@@ -1,16 +1,16 @@
 # SwiftMap
 
-SwiftMap is an **AI-in-the-loop, iterative mapping** paradigm that moves toward fast, autonomous, and fully automatic drone mapping. Instead of the traditional *human-in-the-loop, one-pass*
-workflow, which needs experienced pilots and hours of offline reconstruction, SwiftMap builds on
-Vision Foundation Models (VGGT) to reconstruct dense 3D maps in minutes and to plan the next flight
-on the fly.
+SwiftMap is an **AI-in-the-loop, iterative mapping** paradigm that moves toward fast, autonomous,
+and fully automatic drone mapping. Instead of the traditional *human-in-the-loop, one-pass* workflow —
+experienced pilots plus hours of offline reconstruction — SwiftMap builds on vision foundation models
+to reconstruct dense 3D maps in minutes and plan the next flight on the fly.
 
 <p align="center">
   <img src="figures/mapping.gif" alt="SwiftMap iterative mapping demo" width="100%">
 </p>
 
-*The map gets denser and more complete over multiple flight rounds. Each round shows the total time and the drone's remaining battery.*
-
+*The map gets denser and more complete over multiple flight rounds. Each round shows the total time and
+the drone's remaining battery.*
 
 If you use SwiftMap in your research, please cite:
 
@@ -29,167 +29,232 @@ If you use SwiftMap in your research, please cite:
 
 ---
 
-**SwiftMap** turns a stream (or folder) of
-drone images into a dense 3D reconstruction and a map-quality evaluation, in three stages:
+## What it does
 
-1. **Keyframe (KF) selection** — only frames with enough contribution will be leveraged for VGGT inference.
-2. **VGGT mapping** — the [VGGT](https://github.com/facebookresearch/vggt) model infers camera poses,
-   depth, and a 3D point map from the selected keyframes.
-3. **Map evaluation + Next Flight Navigation (NFN)** — a confidence-colored point cloud shows where the
-   map is reliable, and NFN suggests where to fly next to improve it.
+SwiftMap turns a stream (or folder) of drone frames — each optionally carrying a GPS fix — into a dense
+3D reconstruction, a map-quality evaluation, a next-flight plan, and (optionally) geolocated objects:
+
+1. **Keyframe selection** — optical-flow disparity keeps only frames that add enough new viewpoint.
+2. **Reconstruction** — a pluggable backbone infers camera poses, depth, and a 3D point map.
+   Two are built in: [**VGGT**](https://github.com/facebookresearch/vggt) (point head) and
+   **VGGT-Omega** (depth-based).
+3. **Evaluation + Next Flight Navigation (NFN)** — a confidence-colored cloud shows where the map is
+   reliable; NFN clusters the weak regions and suggests where to fly next.
+4. **Segmentation (optional)** — a text query (e.g. `person`) is segmented per frame with
+   [**SAM 3**](https://github.com/facebookresearch/sam3) and lifted to 3D via the point map; clustered
+   objects become GPS waypoints.
+5. **GPS alignment** — the reconstruction is fit to the streamed GPS, so NFN viewpoints and segmented
+   objects export as lat/lon (JSON + KML for Google My Maps).
+
+Two front ends share the same core:
+
+| | Entry point | Use |
+|---|---|---|
+| **GUI** | `launch_mapping.py` | interactive Gradio web app (step through each stage) |
+| **Headless server** | `launch_server.py` / `swiftmap.server` | container that auto-runs the whole pipeline at the keyframe cap (for SteelEagle) |
 
 ---
 
 ## Repository layout
 
 ```
-SwiftMap/
-├── launch_mapping.py        # Entry point — launches the Gradio web GUI
-├── pyproject.toml           # Dependencies (managed with uv)
-├── swiftmap/                # The SwiftMap package
-│   ├── core/                # Domain logic
-│   │   ├── tcp_server.py            # TCP keyframe-collection server
-│   │   ├── keyframe_selector/       # optical-flow keyframe selection (+ frame_tracker)
-│   │   ├── mapper/                  # Pluggable reconstruction backbones:
-│   │   │                            #   base.py (BaseMapper) + registry + backends/{vggt,vggt_omega}
-│   │   │                            #   + shared postprocess / scene_export / confidence / geometry
-│   │   └── nfn/                     # Next Flight Navigation planner
-│   └── frontend/            # Gradio web UI, gradio compat shim, Viser viewer
-└── test/                    # test_client.py (streaming client)
+swift_map/
+├── launch_mapping.py         # GUI entry point (Gradio web app)
+├── launch_server.py          # headless auto-mapping server entry point
+├── Dockerfile                # server container image
+├── pyproject.toml            # deps (uv); model backbones are optional extras
+├── swiftmap/
+│   ├── core/
+│   │   ├── session.py            # MappingSession — orchestrates every stage
+│   │   ├── tcp_server.py         # TCP frame+GPS ingest
+│   │   ├── protocol.py           # wire protocol (single source of truth)
+│   │   ├── keyframe_selector/    # optical-flow keyframe selection
+│   │   ├── mapper/               # pluggable reconstruction backbones
+│   │   │   ├── base.py           #   BaseMapper + registry
+│   │   │   ├── backends/         #   vggt.py, vggt_omega.py
+│   │   │   └── postprocess / scene_export / confidence_mapping / geometry
+│   │   ├── semantic/             # text-prompt segmentation (SAM 3) + 3D lift
+│   │   ├── nfn/                  # Next Flight Navigation planner + KML export
+│   │   └── geo_transform/        # local ↔ GPS (Umeyama / ICP)
+│   ├── server/                   # headless AutoMappingServer
+│   └── frontend/                 # Gradio GUI + Viser NFN viewer
+└── test/test_client.py       # streaming test client
 ```
 
-The reconstruction models (VGGT, VGGT-Omega) are external packages installed
-into the environment, not vendored in-tree — see the optional dependencies in
-`pyproject.toml`.
+The reconstruction backbones (VGGT, VGGT-Omega) and the segmenter (SAM 3) are **external packages**,
+installed as optional extras — nothing model-specific is vendored in-tree.
 
 ---
 
 ## Installation
 
-SwiftMap uses [uv](https://docs.astral.sh/uv/) to manage its Python environment.
+SwiftMap uses [uv](https://docs.astral.sh/uv/). A CUDA GPU is strongly recommended.
 
 ```bash
-git clone <YOUR_REPO_URL> SwiftMap
-cd SwiftMap
-
-uv sync          # creates .venv and installs all dependencies from the lockfile
+git clone <YOUR_REPO_URL> swift_map
+cd swift_map
+uv sync                        # core deps into .venv
 ```
 
-Then run any command with `uv run …` (no environment to activate). The VGGT model weights
-(`facebook/VGGT-1B`) download automatically from Hugging Face on the first run. A CUDA GPU is
-strongly recommended.
+Then install the backbone(s) and segmenter you want (declared as extras in `pyproject.toml`):
 
-### Get test data
+```bash
+# reconstruction backbones
+uv pip install "vggt @ git+https://github.com/facebookresearch/vggt.git@c3953fab"
+uv pip install "vggt-omega @ git+https://github.com/facebookresearch/vggt-omega.git@39a0cb8"
 
-Download the sample drone images here:
+# segmentation (SAM 3 still imports pkg_resources -> setuptools must stay <81)
+uv pip install "sam3 @ git+https://github.com/facebookresearch/sam3.git" "setuptools<81" pycocotools
+```
 
-> **Test images:** `<DOWNLOAD_LINK>`  *(provided separately)*
+Weights: **VGGT** (`facebook/VGGT-1B`) and **SAM 3** (`facebook/sam3`) download from Hugging Face on
+first use. **VGGT-Omega** needs a local checkpoint — set `VGGT_OMEGA_CHECKPOINT=/path/to/…512.pt`.
 
-Unzip them into a folder, e.g. `data/test_images/` (a flat folder of `.jpg` / `.png` frames). Use this
-folder wherever a directory of images is needed below.
+Run anything with `uv run …` (no venv to activate).
 
 ---
 
-## Running SwiftMap
-
-Start the web interface:
+## A. Run the GUI
 
 ```bash
-uv run python launch_mapping.py
+uv run python launch_mapping.py          # default http://localhost:7866
 ```
 
-(`--host` and `--gui-port` override the bind address and port; run
-`uv run python launch_mapping.py --help` for the full list.)
-
-Open the printed URL (default **http://localhost:7866**). The page has two 3D viewers on top
-(**3D Reconstruction** and **Confidence Map**) and three control tabs below. Follow the steps in order:
+Open the printed URL. Two 3D viewers sit on top (**3D Reconstruction**, **Confidence Map**); the
+control tabs are below.
 
 <p align="center">
   <img src="figures/gui.png" alt="SwiftMap GUI overview" width="100%">
 </p>
 
-*The SwiftMap web GUI: the two 3D viewers sit on top, and the control tabs referenced in the steps
-below are along the bottom.*
+**1. Collect keyframes** — tab **🌐 SwiftMap Mapping Engine Control**
+- Set **TCP Port** (default `43322`) and **Min Disparity** (larger = fewer keyframes), click
+  **🚀 Start**. Then stream frames from another terminal:
+  ```bash
+  uv run python test/test_client.py --host localhost --port 43322 \
+         --image-dir data/test_images --delay 0.1
+  ```
+  Watch **Collected Keyframes** rise.
 
-### 1. Collect keyframes  (tab: **🌐 SwiftMap Mapping Engine Control**)
-* Set **TCP Port** (default `43322`) and **Min Disparity Threshold** (how much motion before a new
-   keyframe is taken — larger = fewer keyframes).
-* Click **🚀 Start SwiftMap Mapping Engine**. **Server Status** turns to running.
-* Stream images to it (from another terminal):
+**2. Pick models** — tab **⚙️ Processing Control**
+- Choose a **① Reconstruction model** (VGGT / VGGT-Omega) and, to segment, a **① Segmentation model**
+  (SAM 3). Controls stay grayed out until a model is selected.
+
+**3. Map & evaluate**
+- **🔄 3D Mapping** → fills the left viewer. **📊 Generate Confidence Map** → right viewer (red = weak,
+  green = solid).
+- **🔴 Segment** with a query (e.g. `person`) → the left viewer highlights the matched points in red.
+
+**4. Geolocate & plan**
+- **🛰️ Calibrate GPS Alignment** (needs streamed GPS or a CSV) so results get lat/lon.
+- **🧭 Analyze with NFN** → opens an interactive **Viser** viewer (separate page) with 🔴 to-improve
+  regions, 🟡 clusters, 🔵 suggested viewpoints, 🟢 existing cameras.
+
+**5. Export** — tick the artifacts you want (each enables once it exists) and click **💾 Export selected**.
+
+---
+
+## B. Run the headless server
+
+The server collects frame+GPS pairs and, once the keyframe cap fills, **auto-runs the whole pipeline**
+(reconstruct → GPS-align → NFN → segment → export) and writes everything to an output directory. No GUI.
+
+```bash
+uv run python launch_server.py \
+    --backbone vggt --seg-queries person,car --max-keyframes 70 --output-dir output
+```
+
+All flags have env equivalents (see `python launch_server.py --help`):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `SWIFTMAP_PORT` | `43322` | TCP ingest port |
+| `SWIFTMAP_BACKBONE` | `vggt` | `vggt` \| `vggt_omega` |
+| `SWIFTMAP_SEG_QUERIES` | *(empty)* | comma list; empty disables segmentation |
+| `SWIFTMAP_MAX_KEYFRAMES` | `70` | keyframe count that triggers a run |
+| `SWIFTMAP_CONF_THRESHOLD` | `60` | confidence percentile cut |
+| `SWIFTMAP_CONTINUOUS` | `true` | after a run, clear and map the next batch |
+| `SWIFTMAP_OUTPUT_DIR` | `output` | export dir (mount this in Docker) |
+
+---
+
+## C. Docker / SteelEagle deployment
+
+SwiftMap plugs into the [SteelEagle](https://github.com/cmusatyalab/steeleagle) backend as a mapping
+server that the **SwiftMap cognitive engine** forwards to (like the SLAM engine → TerraSLAM).
+
+1. **Build the server image** from this repo:
    ```bash
-   uv run python test/test_client.py --host localhost --port 43322 \
-          --image-dir data/test_images --delay 0.1
+   docker build -t cmusatyalab/steeleagle-swiftmap-server:latest .
    ```
-   Watch **Collected Keyframes** go up. (Use **🗑️ Clear Keyframes** to start over.)
+2. **Run it via the SteelEagle compose** (the `swiftmap-server` + `swiftmap-engine` services):
+   ```bash
+   cd steeleagle/backend/server && cp template.env .env   # edit as needed
+   docker compose up swiftmap-server swiftmap-engine
+   ```
 
-### 2. Reconstruct  (tab: **⚙️ Processing Control**)
-* Set **Confidence Threshold (%)** and, if you like, **Filter Sky** / **Filter Dynamic Objects**.
-* Click **🔄 Process Keyframes with VGGT**. The **3D Reconstruction** viewer (top-left) fills in.
+The cognitive engine is **distance-gated**: it forwards at most one frame+GPS pair per
+`SWIFTMAP_SEND_DISTANCE` meters of travel (default 5 m) so it never overfills the server; the server
+still does its own keyframe selection. Exports land on the host via the mounted volume
+(`steeleagle-vol/swiftmap/`).
 
-### 3. Evaluate map quality  (tab: **⚙️ Processing Control**)
-- Click **📊 Generate Confidence Map**. The **Confidence Map** viewer (top-right) shows a red→green cloud
-  (red = low quality, green = high quality).
-
-### 4. Plan the next flight (NFN)  (tab: **⚙️ Processing Control**)
-- Click **🧭 Analyze with NFN**. SwiftMap finds the regions worth re-flying and opens an interactive
-  **Viser** viewer in a separate page (default **http://localhost:8080** — use the link shown next to the
-  button, or open it manually). There you see 🔴 to-improve regions, 🔵 suggested next viewpoints, and
-  🟢 your existing cameras over the point cloud. The **candidate viewpoint positions and orientations**
-  are also written to the **Processing Log** (see Step 6).
-
-### 5. Export  (tab: **⚙️ Processing Control**)
-- Click **💾 Export Results** to write the camera poses to the run's output folder.
-
-### 6. Monitor  (tab: **📈 Statistics & Info**)
-- **Live Statistics** shows server/keyframe status; **Processing Log** shows messages and the NFN
-  candidate viewpoint list (position + look direction for each suggested camera).
+**Data flow:** drone → Gabriel → swiftmap-engine (1 pair / 5 m) → TCP → swiftmap-server (map at cap) →
+`output/input_stream_<timestamp>/`.
 
 ---
 
 ## Output
 
-Each run writes a timestamped directory in the working folder:
+Each run writes a timestamped directory:
 
 ```
 input_stream_YYYYMMDD_HHMMSS/
-├── images/             # the selected keyframes
-├── sky_masks/          # sky masks (if sky filtering is on)
-├── scene.glb           # 3D reconstruction
-├── confidence_map.glb  # map-quality (confidence) visualization
-├── pointcloud_*.ply    # point cloud export
-├── predictions.npz     # raw VGGT outputs
-└── camera_poses.json   # estimated camera poses
+├── images/                       # the keyframes used
+├── scene.glb                     # 3D reconstruction
+├── confidence_map.glb / .ply     # map-quality (confidence) cloud
+├── pointcloud_*.ply              # point cloud
+├── predictions.npz               # raw backbone outputs
+├── camera_poses.json             # estimated camera poses
+├── next_flight_viewpoints.json   # NFN plan (+ GPS when aligned)
+├── next_flight_viewpoints.kml    # NFN target pins (Google My Maps)
+├── next_flight_area.kml          # NFN coverage polygon
+├── transform.json                # local→GPS fit (when aligned)
+├── segmented_<query>.glb         # highlighted segmentation cloud
+└── segmented_objects.json / .kml # per-object centroids (+ GPS)
 ```
 
-Open the `.glb` / `.ply` files in any 3D viewer (MeshLab, Blender, …).
+Open the `.glb` / `.ply` in any 3D viewer (MeshLab, Blender, …); import the `.kml` into Google My Maps.
 
 ---
 
 ## TCP protocol
 
-The streaming server speaks a simple binary protocol (used by `test/test_client.py`):
+`swiftmap/core/protocol.py` is the single source of truth. Per frame, a client sends:
 
-1. Send the image size as **4 bytes, big-endian unsigned int**.
-2. Send the **JPEG-encoded** image bytes.
+```
+[ 4-byte big-endian uint32   image size            ]
+[ <image size> bytes         JPEG image            ]
+[ 24-byte 3×float64          GPS: lat, lon, alt    ]   (NaN triple = no GPS)
+```
+
+and the server replies with `3×float64` `(status, keyframe_count, total_frames)`. See
+`test/test_client.py` for a reference client.
 
 ---
 
 ## Acknowledgements
 
-- **VGGT** (Visual Geometry Grounded Transformer), Meta AI — the bundled `vggt/` package and the
-  `facebook/VGGT-1B` weights. See https://github.com/facebookresearch/vggt.
-- **VGGT-SLAM** — inspiration for the optical-flow keyframe-selection algorithm.
+- **VGGT** (Visual Geometry Grounded Transformer), Meta AI — reconstruction backbone
+  (`facebook/VGGT-1B`). https://github.com/facebookresearch/vggt
+- **VGGT-Omega** — depth-based reconstruction backbone.
+- **SAM 3** (Segment Anything Model 3), Meta AI — text-prompt segmentation.
+  https://github.com/facebookresearch/sam3
+- **VGGT-SLAM** — inspiration for the optical-flow keyframe-selection heuristic.
+- **TerraSLAM** — GPS-alignment (Umeyama/ICP) approach.
 
 ## License
 
-SwiftMap is made of two parts with **different licenses**:
-
-| Part | Files | License |
-|------|-------|---------|
-| **SwiftMap** (our own code) | `swiftmap/` | **GNU GPL v2** — see [`LICENSE`](./LICENSE) |
-| **VGGT** (vendored from Meta) | `vggt/`  | **CC BY-NC 4.0** — see [`vggt/LICENSE`](./vggt/LICENSE) |
-
-The bundled `vggt/` package is from
-[`facebookresearch/vggt`](https://github.com/facebookresearch/vggt) at commit **`b0057ad`**
-(2025-07-14), which — together with the `facebook/VGGT-1B` weights — is licensed under **Creative
-Commons Attribution-NonCommercial 4.0 (CC BY-NC 4.0)**.
+The SwiftMap code (`swiftmap/`, `launch_*.py`) is licensed under **GNU GPL v2** — see
+[`LICENSE`](./LICENSE). The reconstruction backbones and segmenter are **external dependencies** with
+their own licenses; note that **VGGT** (`facebook/VGGT-1B`) is **CC BY-NC 4.0 (non-commercial)**, which
+governs its use regardless of how SwiftMap is licensed.
