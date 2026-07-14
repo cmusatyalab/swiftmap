@@ -183,19 +183,17 @@ def generate_confidence_mapping(predictions: Dict[str, Any],
             return {"error": "No world points or depth available in predictions"}
 
         conf_threshold_normalized = params["conf_threshold"] / 100.0
+        target_ply_path = os.path.join(target_dir, "confidence_map.ply")
         scene, stats, ply_path = generate_confidence_point_cloud(
             world_points=world_points,
             confidence=world_points_conf,
             conf_threshold=conf_threshold_normalized,
             colormap="red_to_green",
             save_ply=True,
+            ply_path=target_ply_path,
         )
-
-        target_ply_path = None
-        if ply_path and os.path.exists(ply_path):
-            target_ply_path = os.path.join(target_dir, "confidence_map.ply")
-            shutil.move(ply_path, target_ply_path)
-            print(f"Confidence map PLY moved to: {target_ply_path}")
+        if ply_path:
+            print(f"Confidence map PLY saved: {ply_path}")
 
         conf_glb_path = os.path.join(target_dir, "confidence_map.glb")
         if scene:

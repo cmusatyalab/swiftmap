@@ -27,7 +27,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip "setuptools<81" wheel && 
     python -m pip install --no-cache-dir \
         torch==2.3.1 torchvision==0.18.1 "numpy<2" Pillow einops safetensors huggingface_hub \
         opencv-python-headless trimesh scipy matplotlib requests pymap3d onnxruntime \
-        timm ftfy regex iopath pycocotools gradio==5.17.1 && \
+        timm ftfy regex iopath pycocotools psutil gradio==5.17.1 && \
     python -m pip install --no-cache-dir \
         "vggt @ git+https://github.com/facebookresearch/vggt.git@c3953fabdcc66fe52b578f27c59516d567416953" \
         "vggt-omega @ git+https://github.com/facebookresearch/vggt-omega.git@39a0cb8" \

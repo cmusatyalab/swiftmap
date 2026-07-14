@@ -52,7 +52,6 @@ def make_area_tag(site: str, when: datetime) -> str:
     return f"{safe}_{when.strftime('%Y%m%d_%H%M%S')}"
 
 
-# ------------------------------------------------------------------ metadata / IO
 def write_area_metadata(area_dir, tag, site, created, num_keyframes, preds, gps_transform):
     """Write ``area.json`` (identity + GPS center/geohash when aligned)."""
     meta = {
@@ -65,7 +64,7 @@ def write_area_metadata(area_dir, tag, site, created, num_keyframes, preds, gps_
         cams = np.asarray(preds.get("camera_positions")) if preds else None
         if gps_transform is not None and cams is not None and len(cams):
             lla = np.asarray(gps_transform.to_lla(cams.mean(0)), dtype=float).tolist()
-            meta["center_gps"] = lla                       # [lat, lon, alt]
+            meta["center_gps"] = lla
             meta["geohash"] = geohash_encode(lla[0], lla[1])
     except Exception as e:
         print(f"[areas] metadata GPS center failed: {e}")
@@ -80,7 +79,7 @@ def export_model_input_images(preds, area_dir, subdir="model_input"):
     from swiftmap.core.segmentation import lift
     dst = os.path.join(area_dir, subdir)
     os.makedirs(dst, exist_ok=True)
-    for i, frame in enumerate(lift.frame_images(preds)):     # HWC uint8 RGB
+    for i, frame in enumerate(lift.frame_images(preds)):
         cv2.imwrite(os.path.join(dst, f"frame_{i:06d}.jpg"),
                     cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     return dst
@@ -121,7 +120,6 @@ def load_gps_transform(area_dir):
         return GpsTransform(json.load(f))
 
 
-# --------------------------------------------------------------- segment service
 def segment_area(output_dir, tag, query, segmenter, conf_threshold=60.0):
     """Segment a stored area on demand: reload it from disk, run the segmenter,
     lift masks to 3D, cluster objects, GPS-tag them, and export into the area dir.

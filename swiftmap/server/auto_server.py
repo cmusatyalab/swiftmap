@@ -39,19 +39,17 @@ from swiftmap.server import areas
 class ServerConfig:
     host: str = "0.0.0.0"
     port: int = protocol.TCP_PORT
-    backbone: str = "vggt"                 # reconstruction model: vggt | vggt_omega
-    segmenter: str = "sam3"                # segmentation model (on-demand service)
-    site: str = "area"                     # area-tag prefix (drone / site name)
-    max_keyframes: int = constants.DEFAULT_MAX_KEYFRAMES   # cap that triggers a run
+    backbone: str = "vggt"
+    segmenter: str = "sam3"
+    site: str = "area"
+    max_keyframes: int = constants.DEFAULT_MAX_KEYFRAMES
     conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD
     mask_sky: bool = True
     mask_dynamic: bool = False
-    keep_all: bool = False                 # keep every frame (skip disparity selection)
+    keep_all: bool = False
     min_disparity: float = constants.DEFAULT_MIN_DISPARITY
-    output_dir: str = "output"             # working dir for exports (mount this)
-    poll_interval: float = 1.0             # seconds between cap checks
-    # Results viewer (Gradio) — always started: shows each run's reconstruction /
-    # confidence / NFN summary, and lets a client segment an area on demand.
+    output_dir: str = "output"
+    poll_interval: float = 1.0
     viewer_host: str = "0.0.0.0"
     viewer_port: int = constants.GUI_PORT
 
@@ -62,26 +60,21 @@ class AutoMappingServer:
     def __init__(self, config: ServerConfig):
         self.cfg = config
         os.makedirs(config.output_dir, exist_ok=True)
-        # All exports use paths relative to the cwd (<area_tag>/...), so run from the
-        # (mounted) output dir to land artifacts on the host.
         os.chdir(config.output_dir)
-        self._root = os.getcwd()           # where area dirs live (== abspath output_dir)
+        self._root = os.getcwd()
 
         self.session = MappingSession(host=config.host,
                                       min_disparity=config.min_disparity)
         self.session.max_keyframes = config.max_keyframes
         self.session.set_backbone(config.backbone)
-        self.session.set_segmenter(config.segmenter)   # reused by the segment service
+        self.session.set_segmenter(config.segmenter)
 
-        # Serializes the auto-pipeline against on-demand segmentation (shared GPU).
         self._lock = threading.RLock()
-        # Snapshot of the last completed run, read by the viewer (paths + summary).
         self.latest_run: dict = {}
         self._processing = False
         self._run_idx = 0
         self._stop = threading.Event()
 
-    # --------------------------------------------------------------- lifecycle
     def run(self):
         """Start collecting and block, running the pipeline whenever the cap fills."""
         print(f"[swiftmap-server] starting on {self.cfg.host}:{self.cfg.port}")
@@ -92,7 +85,7 @@ class AutoMappingServer:
         if not self.session.start(port=self.cfg.port, keep_all=self.cfg.keep_all):
             raise RuntimeError("Failed to start the TCP collection server")
 
-        self._start_viewer()   # always on
+        self._start_viewer()
 
         try:
             self._monitor_loop()
@@ -109,11 +102,33 @@ class AutoMappingServer:
                 self._run_pipeline()
             time.sleep(self.cfg.poll_interval)
 
-    # ---------------------------------------------------------------- pipeline
+    _MIN_KEYFRAMES = 1
+
     def _run_pipeline(self):
-        """Map one batch into an area: reconstruct → GPS-align → NFN → export."""
+        """Map one batch into an area: reconstruct -> GPS-align -> NFN -> export."""
         with self._lock:
             self._run_pipeline_locked()
+
+    def map_now(self) -> dict:
+        """Force-map the current (partial) batch immediately, then start a fresh one.
+
+        Backs the viewer's "Map now" button — maps whatever keyframes are retained
+        so far without waiting for the cap. Serialized against the auto-loop.
+        """
+        with self._lock:
+            if self._processing:
+                return {"error": "A mapping run is already in progress."}
+            n = self.session.get_keyframe_count()
+            if n < self._MIN_KEYFRAMES:
+                return {"error": f"Only {n} keyframe(s) collected — need at least "
+                                 f"{self._MIN_KEYFRAMES} to map."}
+            self._run_pipeline_locked()
+        lr = self.latest_run
+        if lr:
+            return {"success": True, "area_tag": lr.get("area_tag"),
+                    "num_keyframes": lr.get("num_keyframes"),
+                    "num_viewpoints": lr.get("num_viewpoints")}
+        return {"error": "Mapping produced no result (check the server logs)."}
 
     def _run_pipeline_locked(self):
         self._processing = True
@@ -127,7 +142,7 @@ class AutoMappingServer:
               f"-> area '{area_tag}' ===")
         try:
             params = {
-                "output_name": area_tag,            # name the run dir by the area tag
+                "output_name": area_tag,
                 "conf_threshold": float(self.cfg.conf_threshold),
                 "mask_sky": self.cfg.mask_sky,
                 "mask_dynamic": self.cfg.mask_dynamic,
@@ -142,7 +157,6 @@ class AutoMappingServer:
                 return
             target_dir = result.get("scene_results", {}).get("target_directory")
 
-            # GPS alignment from the streamed frame/GPS pairs (1:1, synced).
             if self.session.has_stream_gps():
                 cfg = self.session.align_gps(use_icp=False)
                 if "error" in cfg:
@@ -153,23 +167,20 @@ class AutoMappingServer:
             else:
                 print("[swiftmap-server] no streamed GPS — exports stay in local coords")
 
-            # Next-flight plan (NFN).
             plan = self.session.plan(low_percentile=constants.NFN_LOW_PERCENTILE,
                                      high_percentile=constants.NFN_HIGH_PERCENTILE)
             print(f"[swiftmap-server] NFN: "
                   f"{plan.get('error') or str(plan.get('num_viewpoints', 0)) + ' viewpoints'}")
 
-            # Export results (no segmentation — that is the on-demand service).
             preds = self.session.latest_predictions
             self.session.export_camera_poses()
-            self.session.export_nfn_plan()                      # nfn json + kml + area kml
-            areas.export_model_input_images(preds, target_dir)  # reduced-res model frames
+            self.session.export_nfn_plan()
+            areas.export_model_input_images(preds, target_dir)
             areas.write_area_metadata(target_dir, area_tag, self.cfg.site, created, n,
                                       preds, self.session.gps_transform)
             print(f"[swiftmap-server] run #{run} exported area '{area_tag}' "
                   f"in {time.time() - t0:.1f}s")
 
-            # Publish to the viewer (absolute paths so Gradio can serve them).
             self.latest_run = {
                 "run": run, "area_tag": area_tag,
                 "target_dir": os.path.abspath(target_dir),
@@ -186,7 +197,7 @@ class AutoMappingServer:
             print(f"[swiftmap-server] run #{run} pipeline error: {e}")
             traceback.print_exc()
         finally:
-            self.session.clear_keyframes()   # always start a fresh batch for the next area
+            self.session.clear_keyframes()
             self._processing = False
 
     @staticmethod
@@ -195,7 +206,6 @@ class AutoMappingServer:
         p = os.path.abspath(os.path.join(target_dir, name))
         return p if os.path.exists(p) else None
 
-    # ------------------------------------------------------------------ viewer
     def _start_viewer(self):
         """Launch the passive Gradio results viewer (non-blocking); headless if it fails."""
         try:
@@ -214,7 +224,6 @@ class AutoMappingServer:
         state["cap"] = self.cfg.max_keyframes
         return state
 
-    # -------------------------------------------------- on-demand segment service
     def list_area_tags(self) -> List[str]:
         """Area tags available to segment (newest first)."""
         return [m["area_tag"] for m in areas.list_areas(self._root)]

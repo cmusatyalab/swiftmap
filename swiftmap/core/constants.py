@@ -31,7 +31,9 @@ NFN_VISER_PORT = 7867  # Viser NFN viewer (opened on demand)
 # --- Model asset URLs -------------------------------------------------------
 VGGT_MODEL_URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
 SKYSEG_ONNX_URL = "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx"
-SKYSEG_ONNX_FILENAME = "skyseg.onnx"
+SKYSEG_ONNX_PATH = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+    "swiftmap", "skyseg.onnx")
 
 # --- VGGT-Omega -------------------------------------------------------------
 # Omega ships no weights on a hub; it loads from a local checkpoint (.pt) via

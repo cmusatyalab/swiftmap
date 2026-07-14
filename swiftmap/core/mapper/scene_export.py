@@ -60,9 +60,10 @@ def _apply_sky_mask(conf, target_dir):
 
     _, H, W = conf.shape
 
-    if not os.path.exists(constants.SKYSEG_ONNX_FILENAME):
-        print("Downloading skyseg.onnx...")
-        download_file_from_url(constants.SKYSEG_ONNX_URL, constants.SKYSEG_ONNX_FILENAME)
+    if not os.path.exists(constants.SKYSEG_ONNX_PATH):
+        print(f"Downloading skyseg.onnx -> {constants.SKYSEG_ONNX_PATH}")
+        os.makedirs(os.path.dirname(constants.SKYSEG_ONNX_PATH), exist_ok=True)
+        download_file_from_url(constants.SKYSEG_ONNX_URL, constants.SKYSEG_ONNX_PATH)
 
     skyseg_session = None
     sky_mask_list = []
@@ -73,7 +74,7 @@ def _apply_sky_mask(conf, target_dir):
             sky_mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
         else:
             if skyseg_session is None:
-                skyseg_session = onnxruntime.InferenceSession(constants.SKYSEG_ONNX_FILENAME)
+                skyseg_session = onnxruntime.InferenceSession(constants.SKYSEG_ONNX_PATH)
             sky_mask = segment_sky(image_filepath, skyseg_session, mask_filepath)
         if sky_mask.shape[0] != H or sky_mask.shape[1] != W:
             sky_mask = cv2.resize(sky_mask, (W, H))

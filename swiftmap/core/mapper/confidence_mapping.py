@@ -26,7 +26,8 @@ def generate_confidence_point_cloud(
     colormap: str = "red_to_green",
     max_points: Optional[int] = 50000,  # Reduced for better 3D performance
     point_size: float = 0.002,
-    save_ply: bool = True  # Generate PLY file alongside GLB scene
+    save_ply: bool = True,
+    ply_path: Optional[str] = None,
 ) -> Tuple[trimesh.Scene, Dict[str, float], Optional[str]]:
     """
     Generate a confidence-colored 3D point cloud for map quality visualization.
@@ -178,7 +179,8 @@ def generate_confidence_point_cloud(
             points=flipped_points,
             confidence_values=filtered_conf,
             colors=colors,
-            stats=stats
+            stats=stats,
+            ply_path=ply_path,
         )
         
     # Always return GLB scene for display, plus optional PLY filename
@@ -398,33 +400,37 @@ def save_confidence_point_cloud_ply(
     confidence_values: np.ndarray,
     colors: np.ndarray,
     stats: Dict[str, float],
+    ply_path: Optional[str] = None,
     output_dir: str = "output/",
     filename_prefix: str = "confidence_map"
 ) -> str:
     """
     Save confidence point cloud as PLY file with absolute confidence values.
-    
+
     Args:
         points: 3D points array [N, 3]
         confidence_values: Absolute confidence values [N,]
         colors: RGBA color array [N, 4]
         stats: Statistics dictionary from confidence analysis
-        output_dir: Directory to save PLY file
-        filename_prefix: Prefix for the output filename
-        
+        ply_path: Exact output path. If given, the file is written there directly
+            (no staging dir). Otherwise a timestamped name under ``output_dir``.
+        output_dir: Fallback directory when ``ply_path`` is not given.
+        filename_prefix: Prefix for the fallback filename.
+
     Returns:
         str: Path to saved PLY file
     """
     import os
     from datetime import datetime
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Generate filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ply_filename = os.path.join(output_dir, f"{filename_prefix}_{timestamp}.ply")
-    
+
+    if ply_path:
+        os.makedirs(os.path.dirname(ply_path) or ".", exist_ok=True)
+        ply_filename = ply_path
+    else:
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ply_filename = os.path.join(output_dir, f"{filename_prefix}_{timestamp}.ply")
+
     # Write PLY file with custom format
     num_points = len(points)
     
