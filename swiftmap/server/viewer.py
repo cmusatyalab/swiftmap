@@ -32,16 +32,17 @@ def build_viewer(server):
     """Build the results viewer Blocks for ``server``. Raises if gradio is absent."""
     import gradio as gr
 
-    def refresh(seen_run, current_area):
+    def refresh(seen_run):
         st = server.viewer_state()
         status = _status_md(st)
         run = st.get("run")
         if not run or run == seen_run:
-            return status, gr.update(), gr.update(), gr.update(), seen_run
+            return status, gr.update(), gr.update(), seen_run
+        return status, st.get("scene_glb"), st.get("confidence_glb"), run
+
+    def refresh_areas(current):
         tags = server.list_area_tags()
-        keep = current_area if current_area in tags else None
-        return (status, st.get("scene_glb"), st.get("confidence_glb"),
-                gr.update(choices=tags, value=keep), run)
+        return gr.update(choices=tags, value=(current if current in tags else None))
 
     def do_map_now():
         res = server.map_now()
@@ -79,14 +80,16 @@ def build_viewer(server):
         with gr.Accordion("Segment an area", open=True):
             with gr.Row():
                 area_dd = gr.Dropdown(label="Area", choices=server.list_area_tags(), scale=2)
+                refresh_btn = gr.Button("Refresh areas", scale=0, min_width=140)
                 query = gr.Textbox(label="Query", placeholder="e.g. person", scale=2)
                 seg_btn = gr.Button("Segment", variant="primary", scale=0, min_width=140)
             seg_status = gr.Markdown()
             seg_view = gr.Model3D(label="Segmentation (matched points in red)", height=460)
 
         last_run = gr.State(0)
-        gr.Timer(2.0).tick(refresh, inputs=[last_run, area_dd],
-                           outputs=[status, recon, conf, area_dd, last_run])
+        gr.Timer(2.0).tick(refresh, inputs=[last_run],
+                           outputs=[status, recon, conf, last_run])
+        refresh_btn.click(refresh_areas, inputs=[area_dd], outputs=[area_dd])
         map_btn.click(do_map_now, outputs=[map_status])
         seg_btn.click(do_segment, inputs=[area_dd, query], outputs=[seg_view, seg_status])
 
