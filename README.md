@@ -123,34 +123,30 @@ uv run python launch_mapping.py          # default http://localhost:7866
 Open the printed URL. Two 3D viewers sit on top (**3D Reconstruction**, **Confidence Map**); the
 control tabs are below.
 
-<p align="center">
-  <img src="figures/gui.png" alt="SwiftMap GUI overview" width="100%">
-</p>
-
-**1. Collect keyframes** — tab **🌐 SwiftMap Mapping Engine Control**
+**1. Collect keyframes** — tab ** SwiftMap Mapping Engine Control**
 - Set **TCP Port** (default `43322`) and **Min Disparity** (larger = fewer keyframes), click
-  **🚀 Start**. Then stream frames from another terminal:
+  ** Start**. Then stream frames from another terminal:
   ```bash
   uv run python test/test_client.py --host localhost --port 43322 \
          --image-dir data/test_images --delay 0.1
   ```
   Watch **Collected Keyframes** rise.
 
-**2. Pick models** — tab **⚙️ Processing Control**
-- Choose a **① Reconstruction model** (VGGT / VGGT-Omega) and, to segment, a **① Segmentation model**
+**2. Pick models** — tab ** Processing Control**
+- Choose a ** Reconstruction model** (VGGT / VGGT-Omega) and, to segment, a ** Segmentation model**
   (SAM 3). Controls stay grayed out until a model is selected.
 
 **3. Map & evaluate**
-- **🔄 3D Mapping** → fills the left viewer. **📊 Generate Confidence Map** → right viewer (red = weak,
+- ** 3D Mapping** → fills the left viewer. ** Generate Confidence Map** → right viewer (red = weak,
   green = solid).
-- **🔴 Segment** with a query (e.g. `person`) → the left viewer highlights the matched points in red.
+- ** Segment** with a query (e.g. `person`) → the left viewer highlights the matched points in red.
 
 **4. Geolocate & plan**
-- **🛰️ Calibrate GPS Alignment** (needs streamed GPS or a CSV) so results get lat/lon.
-- **🧭 Analyze with NFN** → opens an interactive **Viser** viewer (separate page) with 🔴 to-improve
-  regions, 🟡 clusters, 🔵 suggested viewpoints, 🟢 existing cameras.
+- ** Calibrate GPS Alignment** (needs streamed GPS or a CSV) so results get lat/lon.
+- ** Analyze with NFN** → opens an interactive **Viser** viewer (separate page) with  to-improve
+  regions,  clusters,  suggested viewpoints,  existing cameras.
 
-**5. Export** — tick the artifacts you want (each enables once it exists) and click **💾 Export selected**.
+**5. Export** — tick the artifacts you want (each enables once it exists) and click ** Export selected**.
 
 ---
 
