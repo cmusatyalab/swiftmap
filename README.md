@@ -130,7 +130,7 @@ control tabs are below.
   uv run python test/test_client.py --host localhost --port 43322 \
          --image-dir data/test_images --delay 0.1
   ```
-  Watch **Collected Keyframes** rise.
+- Watch **Collected Keyframes** rise.
 
 **2. Pick models** — tab **Processing Control**
 - Choose a **Reconstruction model** (VGGT / VGGT-Omega) and, to segment, a **Segmentation model**
