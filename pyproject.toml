@@ -1,0 +1,67 @@
+[project]
+name = "swiftmap"
+version = "0.1.0"
+description = "AI-in-the-loop iterative drone mapping (VGGT / VGGT-Omega) with segmentation and Next Flight Navigation"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+license = { text = "GPL-2.0-only" }
+
+dependencies = [
+    # Core: VGGT model + inference
+    "torch==2.3.1",
+    "torchvision==0.18.1",
+    "numpy<2",
+    "Pillow",
+    "einops",
+    "safetensors",
+    "huggingface_hub",
+    "opencv-python",
+
+    # 3D content generation & geometry
+    "trimesh",
+    "scipy",
+    "matplotlib",
+    "requests",
+    "pymap3d",          # ENU <-> geodetic (GPS) conversion for geo-alignment
+    "gradio==5.17.1",
+    "viser==0.2.23",
+
+    # Sky masking via skyseg.onnx (model auto-downloaded on first use).
+    # On by default (--mask-sky), so kept in the core set.
+    "onnxruntime",
+]
+
+# Reconstruction backbones are optional, pinned dependencies — one per model.
+# SwiftMap talks to them only through the BaseMapper adapters in
+# swiftmap/core/mapper/backends, so a model package is imported lazily and only
+# needs to be installed for the backbone(s) you actually run.
+#
+# These git-pinned specs are the reproducible source (use them for Docker/CI):
+#   pip install -e ".[vggt,vggt-omega]"
+# On a dev box you can instead install editable from local clones so you can hack
+# on the model code (this is how the current venv is set up):
+#   uv pip install -e /path/to/vggt        --no-deps
+#   uv pip install -e /path/to/vggt-omega  --no-deps
+# Pick one source per environment — an editable-local install and the git pin
+# cannot both be installed at once.
+[project.optional-dependencies]
+vggt = [
+    "vggt @ git+https://github.com/facebookresearch/vggt.git@c3953fabdcc66fe52b578f27c59516d567416953",
+]
+vggt-omega = [
+    "vggt-omega @ git+https://github.com/facebookresearch/vggt-omega.git@39a0cb8",
+]
+sam3 = [
+    "sam3 @ git+https://github.com/facebookresearch/sam3.git",
+    "setuptools<81",
+    "pycocotools",
+    "psutil",
+]
+
+[tool.uv]
+# This repo is run from its own root and imports the `swiftmap` package via the
+# working directory, so uv manages the venv + dependencies without building or
+# installing swiftmap itself as a wheel. The reconstruction backbones (vggt,
+# vggt-omega) are installed separately as their own packages — see the optional
+# dependencies above.
+package = false

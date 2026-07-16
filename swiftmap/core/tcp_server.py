@@ -3,12 +3,8 @@
 """
 TCP Server for SwiftMap Mapping System
 
-Receives images from drone clients via TCP connection and manages
-keyframe selection for 3D mapping. Compatible with the bundled SwiftMap
-test clients but returns mapping status instead of GPS coordinates.
-
-Port: 43322 (as specified in TODO requirements)
-Protocol: Binary image data reception compatible with existing test clients
+Receives images (+ paired GPS) from drone clients via TCP, runs keyframe selection,
+and replies with mapping status. The wire format lives in ``swiftmap.core.protocol``.
 """
 
 import socket
@@ -22,6 +18,8 @@ from datetime import datetime
 from typing import Optional, Callable, Dict, Any
 import os
 
+from swiftmap.core import protocol
+
 
 class MappingTCPServer:
     """
@@ -31,15 +29,20 @@ class MappingTCPServer:
     and stores selected keyframes for later VGGT mapping processing.
     """
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 43322, 
-                 keyframe_callback: Optional[Callable] = None):
+    def __init__(self, host: str = "0.0.0.0", port: int = protocol.TCP_PORT,
+                 keyframe_callback: Optional[Callable] = None,
+                 temp_dir: Optional[str] = None):
         """
         Initialize the mapping TCP server.
-        
+
         Args:
             host: Server host address
-            port: Server port (default 43322 as specified in TODO)
+            port: Server port (default from protocol.TCP_PORT)
             keyframe_callback: Callback function for keyframe selection
+            temp_dir: Directory for keyframe JPEGs. If provided (session-owned), the
+                      server uses it and does NOT delete it on stop -- so collected
+                      keyframes survive a Stop and remain available for reconstruction.
+                      If None, the server creates and owns its own temp dir.
         """
         self.host = host
         self.port = port
@@ -65,9 +68,16 @@ class MappingTCPServer:
             "last_frame_time": None
         }
         
-        # Use system temporary directory for keyframes (will be cleaned up when server stops)
-        import tempfile
-        self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_")
+        # Keyframe storage. A session-owned temp_dir is reused across start/stop so
+        # keyframes survive a Stop; a self-created one is cleaned up on stop.
+        if temp_dir:
+            self.temp_dir = temp_dir
+            self._owns_temp_dir = False
+            os.makedirs(self.temp_dir, exist_ok=True)
+        else:
+            import tempfile
+            self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_")
+            self._owns_temp_dir = True
         
     def initialize(self) -> bool:
         """
@@ -100,52 +110,48 @@ class MappingTCPServer:
             tuple: (image_array, image_metadata) or None if failed
         """
         try:
-            # Receive image size (4 bytes, big-endian unsigned int)
-            size_data = client_socket.recv(4)
-            if not size_data:
+            # Receive the image-size header, then the JPEG body.
+            size_data = protocol.recv_exact(client_socket, protocol.SIZE_NBYTES)
+            if size_data is None:
                 print("Client disconnected")
                 return None
-            
-            image_size = struct.unpack('!I', size_data)[0]
-            print(f"Receiving image of size: {image_size} bytes")
-            
-            # Receive image data
-            received_data = b''
-            while len(received_data) < image_size:
-                chunk = client_socket.recv(min(4096, image_size - len(received_data)))
-                if not chunk:
-                    print("Connection broken while receiving image")
-                    return None
-                received_data += chunk
-            
-            if len(received_data) != image_size:
-                print(f"Incomplete image received: {len(received_data)}/{image_size} bytes")
+            image_size = struct.unpack(protocol.SIZE_FORMAT, size_data)[0]
+
+            received_data = protocol.recv_exact(client_socket, image_size)
+            if received_data is None:
+                print("Connection broken while receiving image")
                 return None
-            
-            # Decode image from bytes
+
+            # Decode image from bytes.
             nparr = np.frombuffer(received_data, np.uint8)
             image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
             if image is None:
                 print("Failed to decode image from bytes")
                 return None
-            
-            # Create metadata
-            timestamp = datetime.now()
+
+            # Receive the paired per-frame GPS (NaN triple -> None).
+            gps_bytes = protocol.recv_exact(client_socket, protocol.GPS_NBYTES)
+            if gps_bytes is None:
+                print("Connection broken while receiving GPS")
+                return None
+            gps = protocol.unpack_gps(gps_bytes)
+
             metadata = {
-                "timestamp": timestamp,
+                "timestamp": datetime.now(),
                 "image_size": image_size,
                 "image_shape": image.shape,
-                "frame_id": self.total_frames_received + 1
+                "frame_id": self.total_frames_received + 1,
+                "gps": gps,
             }
-            
-            print(f"Successfully received image: {image.shape}")
+
+            print(f"Successfully received image: {image.shape}"
+                  + (f" gps=({gps[0]:.6f},{gps[1]:.6f},{gps[2]:.1f})" if gps else " (no gps)"))
             return image, metadata
-            
+
         except Exception as e:
             print(f"Error receiving image: {e}")
             return None
-    
+
     def send_status_response(self, client_socket, status_code: str, message: str = "") -> bool:
         """
         Send status response back to client.
@@ -159,19 +165,17 @@ class MappingTCPServer:
             bool: True if sent successfully
         """
         try:
-            # Send status as double values for compatibility with localization client
+            # Reply as 3 float64 (see protocol): status, keyframe_count, total_frames.
+            kf, total = self.total_keyframes_selected, self.total_frames_received
             if status_code == "keyframe_selected":
-                # Positive values indicate keyframe selected
-                response_data = struct.pack('3d', 1.0, float(self.total_keyframes_selected), float(self.total_frames_received))
-            elif status_code == "frame_skipped":  
-                # Zero values indicate frame skipped
-                response_data = struct.pack('3d', 0.0, float(self.total_keyframes_selected), float(self.total_frames_received))
+                response_data = protocol.pack_reply(protocol.STATUS_KEYFRAME, kf, total)
+            elif status_code == "frame_skipped":
+                response_data = protocol.pack_reply(protocol.STATUS_SKIPPED, kf, total)
             elif status_code == "error":
-                # Negative values indicate error
-                response_data = struct.pack('3d', -1.0, -1.0, -1.0)
+                response_data = protocol.pack_reply(protocol.STATUS_ERROR, -1.0, -1.0)
             else:  # success
-                response_data = struct.pack('3d', 2.0, float(self.total_keyframes_selected), float(self.total_frames_received))
-            
+                response_data = protocol.pack_reply(protocol.STATUS_SUCCESS, kf, total)
+
             client_socket.sendall(response_data)
             
             status_msg = f"{status_code}"
@@ -201,19 +205,8 @@ class MappingTCPServer:
             frame_id = metadata["frame_id"]
             filename = f"keyframe_{frame_id:06d}_{timestamp_str}.jpg"
             filepath = os.path.join(self.temp_dir, filename)
-            
-            # Save image
+
             cv2.imwrite(filepath, image)
-            
-            # Save metadata
-            metadata_path = filepath.replace('.jpg', '_metadata.txt')
-            with open(metadata_path, 'w') as f:
-                f.write(f"Frame ID: {frame_id}\n")
-                f.write(f"Timestamp: {metadata['timestamp']}\n")
-                f.write(f"Image Size: {metadata['image_size']} bytes\n")
-                f.write(f"Image Shape: {metadata['image_shape']}\n")
-                f.write(f"Keyframe Index: {self.total_keyframes_selected}\n")
-            
             print(f"Keyframe saved: {filepath}")
             return filepath
             
@@ -321,20 +314,24 @@ class MappingTCPServer:
             # Create server socket
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((self.host, self.port))
+            self._bind_with_retry()
             self.server_socket.listen(5)
-            
+            # Time out accept() so the loop periodically checks is_running -- this lets
+            # stop() release the port promptly instead of blocking in accept(), which
+            # is what caused "Address already in use" on a quick restart.
+            self.server_socket.settimeout(1.0)
+
             self.is_running = True
             self.stats["server_start_time"] = datetime.now()
-            
+
             print(f"SwiftMap Mapping TCP Server started on {self.host}:{self.port}")
             print("Waiting for drone clients...")
-            print("Compatible with the bundled test client (swiftmap/utils/test_client.py)")
-            
+            print("Compatible with the bundled test client (test/test_client.py)")
+
             while self.is_running:
                 try:
                     client_socket, client_address = self.server_socket.accept()
-                    
+
                     # Handle client in separate thread
                     client_thread = threading.Thread(
                         target=self.handle_client,
@@ -343,16 +340,38 @@ class MappingTCPServer:
                     )
                     client_thread.start()
                     self.client_threads.append(client_thread)
-                    
-                except Exception as e:
+
+                except socket.timeout:
+                    continue  # no client yet; re-check is_running
+                except OSError as e:
                     if self.is_running:
                         print(f"Error accepting client connection: {e}")
                     break
-                    
+
         except Exception as e:
             print(f"Server error: {e}")
         finally:
             self.stop_server()
+
+    def _bind_with_retry(self, attempts: int = 12, delay: float = 0.5):
+        """Bind the listen socket, retrying briefly on EADDRINUSE.
+
+        Even with SO_REUSEADDR, a just-stopped listener can hold the port for a
+        moment; retrying makes a quick Stop -> Start reliable instead of crashing.
+        """
+        import errno
+        last = None
+        for _ in range(attempts):
+            try:
+                self.server_socket.bind((self.host, self.port))
+                return
+            except OSError as e:
+                last = e
+                if e.errno != errno.EADDRINUSE:
+                    raise
+                print(f"Port {self.port} busy (releasing); retrying bind in {delay}s...")
+                time.sleep(delay)
+        raise last
     
     def stop_server(self):
         """Stop the TCP server and clean up resources."""
@@ -365,16 +384,17 @@ class MappingTCPServer:
         # Wait for client threads to finish
         for thread in self.client_threads:
             thread.join(timeout=1.0)
-        
-        # Clean up temporary directory
-        if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
+
+        # Only clean up a temp dir we created ourselves. A session-owned dir is left
+        # intact so collected keyframes survive a Stop (the session manages its life).
+        if self._owns_temp_dir and hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
             import shutil
             try:
                 shutil.rmtree(self.temp_dir)
                 print(f"Cleaned up temporary directory: {self.temp_dir}")
             except Exception as e:
                 print(f"Warning: Could not clean temp directory: {e}")
-        
+
         print("SwiftMap Mapping TCP Server stopped")
         self.print_final_stats()
     
@@ -459,7 +479,7 @@ if __name__ == "__main__":
     
     try:
         if server.initialize():
-            print("Test server starting. Use swiftmap/utils/test_client.py to test.")
+            print("Test server starting. Use test/test_client.py to test.")
             server.start_server()
     except KeyboardInterrupt:
         print("\nShutting down test server...")

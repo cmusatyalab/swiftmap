@@ -1,39 +1,49 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
 """
-SwiftMap
+SwiftMap — AI-in-the-loop iterative drone mapping.
 
-A real-time drone mapping system that:
-1. Receives drone images via TCP stream
-2. Performs optical flow-based keyframe selection  
-3. Runs VGGT inference on selected keyframes
-4. Provides dual 3D visualization (reconstruction + confidence mapping)
+Turns a stream (or folder) of drone images + GPS into a dense 3D reconstruction,
+a map-quality evaluation, and a next-flight plan:
 
-Key Components:
-- TCP Server: Receives images from drone clients on port 43322
-- Keyframe Selector: Uses optical flow to identify important frames
-- VGGT Mapper: Performs 3D reconstruction inference
-- Gradio Interface: Dual viewer for 3D models and confidence maps
+1. Receive frame+GPS pairs over TCP.
+2. Select keyframes by optical-flow disparity.
+3. Reconstruct with a pluggable backbone (VGGT / VGGT-Omega).
+4. Evaluate confidence, plan the next flight (NFN), and optionally segment
+   objects by text query (SAM 3), with results exportable + GPS-tagged.
 
-Usage:
-    python launch_mapping.py
+Two front ends share the same core: the Gradio GUI (``launch_mapping.py``) and
+the headless auto-mapping server (``launch_server.py`` / ``swiftmap.server``).
 """
 
 __version__ = "1.0.0"
 
 # Main system components
+from swiftmap.core.session import MappingSession
 from swiftmap.core.tcp_server import MappingTCPServer
 from swiftmap.core.keyframe_selector import KeyframeSelector
-from swiftmap.core.vggt_mapper import VGGTMapper
-from swiftmap.core.gradio_interface import MappingGradioInterface
+from swiftmap.core.mapper import (
+    BaseMapper, VGGTMapper, VGGTOmegaMapper, get_mapper, available_mappers)
 
-# Utilities
-from swiftmap.utils.frame_tracker import FrameTracker
+# The Gradio GUI is optional: the headless mapping server (swiftmap.server) runs
+# without gradio/viser installed, so importing the frontend must not be required.
+try:
+    from swiftmap.frontend.gradio_interface import MappingGradioInterface
+except ImportError:
+    MappingGradioInterface = None
+
+# Keyframe selection helper
+from swiftmap.core.keyframe_selector import FrameTracker
 
 __all__ = [
+    "MappingSession",
     "MappingTCPServer",
-    "KeyframeSelector", 
+    "KeyframeSelector",
+    "BaseMapper",
     "VGGTMapper",
+    "VGGTOmegaMapper",
+    "get_mapper",
+    "available_mappers",
     "MappingGradioInterface",
     "FrameTracker"
 ]
