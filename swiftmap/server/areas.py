@@ -120,6 +120,51 @@ def load_gps_transform(area_dir):
         return GpsTransform(json.load(f))
 
 
+def render_area(output_dir, tag, conf_level=60.0):
+    """Reconstruction + confidence GLBs, both regenerated at ``conf_level`` (percentile)."""
+    area_dir = resolve_area_dir(output_dir, tag)
+    if area_dir is None:
+        return {"error": f"Unknown area '{tag}'."}
+    return {"success": True, "area_tag": tag,
+            "scene_glb": _render_reconstruction(area_dir, conf_level),
+            "confidence_glb": _render_confidence(area_dir, conf_level)}
+
+
+def _render_reconstruction(area_dir, conf_level):
+    try:
+        preds = load_predictions(area_dir)
+        from swiftmap.core.mapper.scene_export import predictions_to_glb
+        has_images = bool(glob.glob(os.path.join(area_dir, "images", "*")))
+        scene = predictions_to_glb(
+            predictions=preds, conf_thres=float(conf_level), filter_by_frames="all",
+            mask_black_bg=False, mask_white_bg=False, show_cam=True,
+            mask_sky=has_images, mask_dynamic=False, target_dir=area_dir)
+        path = os.path.join(area_dir, f"reconstruction_view_c{int(round(float(conf_level)))}.glb")
+        scene.export(path)
+        return path
+    except Exception as e:
+        print(f"[areas] reconstruction render failed: {e}")
+        fallback = os.path.join(area_dir, "scene.glb")
+        return fallback if os.path.exists(fallback) else None
+
+
+def _render_confidence(area_dir, conf_level):
+    try:
+        preds = load_predictions(area_dir)
+        wp, conf = preds.get("world_points"), preds.get("world_points_conf")
+        if wp is None or conf is None:
+            return None
+        from swiftmap.core.mapper.confidence_mapping import generate_confidence_point_cloud
+        scene, _, _ = generate_confidence_point_cloud(
+            wp, conf, conf_threshold=float(conf_level) / 100.0, save_ply=False)
+        path = os.path.join(area_dir, f"confidence_view_c{int(round(float(conf_level)))}.glb")
+        scene.export(path)
+        return path
+    except Exception as e:
+        print(f"[areas] confidence render failed: {e}")
+        return None
+
+
 def segment_area(output_dir, tag, query, segmenter, conf_threshold=60.0):
     """Segment a stored area on demand: reload it from disk, run the segmenter,
     lift masks to 3D, cluster objects, GPS-tag them, and export into the area dir.

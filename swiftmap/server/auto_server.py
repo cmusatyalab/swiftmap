@@ -225,19 +225,32 @@ class AutoMappingServer:
         return state
 
     def list_area_tags(self) -> List[str]:
-        """Area tags available to segment (newest first)."""
+        """Area tags available (newest first)."""
         return [m["area_tag"] for m in areas.list_areas(self._root)]
 
-    def segment_area(self, area_tag: str, query: str) -> dict:
-        """Segment ``query`` on a stored ``area_tag`` (request-driven service).
+    def latest_area_tag(self) -> Optional[str]:
+        tag = self.latest_run.get("area_tag") if self.latest_run else None
+        if tag:
+            return tag
+        tags = self.list_area_tags()
+        return tags[0] if tags else None
+
+    def render_area(self, area_tag: str, conf_level: float) -> dict:
+        """Reconstruction + confidence-at-``conf_level`` GLBs for a stored area."""
+        with self._lock:
+            return areas.render_area(self._root, area_tag, conf_level)
+
+    def segment_area(self, area_tag: str, query: str, conf_level: float = None) -> dict:
+        """Segment ``query`` on a stored ``area_tag`` at ``conf_level`` (request-driven).
 
         Decoupled from the mission loop: reloads the area from disk. Serialized
         against the auto-pipeline only because they share the GPU. The returned
         ``glb_path`` is made absolute so the viewer can serve it.
         """
+        conf = self.cfg.conf_threshold if conf_level is None else float(conf_level)
         with self._lock:
             res = areas.segment_area(self._root, area_tag, query,
-                                     self.session.segmenter, self.cfg.conf_threshold)
+                                     self.session.segmenter, conf)
         glb = res.get("glb_path")
         if glb and not os.path.isabs(glb):
             res["glb_path"] = os.path.abspath(glb)
