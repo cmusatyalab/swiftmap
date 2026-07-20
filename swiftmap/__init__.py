@@ -16,7 +16,11 @@ Two front ends share the same core: the Gradio GUI (``launch_mapping.py``) and
 the headless auto-mapping server (``launch_server.py`` / ``swiftmap.server``).
 """
 
-__version__ = "1.0.0"
+from importlib.metadata import version, PackageNotFoundError
+try:
+    __version__ = version("swiftmap")
+except PackageNotFoundError:      # running from source, not pip-installed
+    __version__ = "0.0.0+dev"
 
 # Main system components
 from swiftmap.core.session import MappingSession
