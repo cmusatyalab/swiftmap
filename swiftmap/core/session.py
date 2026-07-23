@@ -226,24 +226,27 @@ class MappingSession:
         buffer (evicting the weakest when over the cap) and keep the GPS CSV in sync."""
         if not self.tcp_server:
             return
-        changed = False
-        snapshot = None
         with self._paths_lock:
-            for kf in self.tcp_server.get_collected_keyframes():
-                path = kf.get("path")
-                if not path or not os.path.exists(path):
-                    continue
-                meta = kf.get("metadata", {})
-                entry = {"seq": self._seq, "score": float(meta.get("score", 0.0)),
-                         "path": path, "gps": meta.get("gps")}
-                self._seq += 1
-                self._total_selected += 1
-                changed |= self._insert_entry(entry)
-            changed |= self._trim_to_cap()  # in case the cap was lowered mid-capture
-            if changed:
-                snapshot = sorted(self._buffer, key=lambda e: e["seq"])
+            snapshot = self._drain_locked()
         if snapshot is not None:
             self._write_gps_csv(snapshot)
+
+    def _drain_locked(self):
+        """Same as ``_drain`` but assumes the caller already holds ``_paths_lock``.
+        Returns the new buffer snapshot (sorted by seq) if it changed, else None."""
+        changed = False
+        for kf in self.tcp_server.get_collected_keyframes():
+            path = kf.get("path")
+            if not path or not os.path.exists(path):
+                continue
+            meta = kf.get("metadata", {})
+            entry = {"seq": self._seq, "score": float(meta.get("score", 0.0)),
+                     "path": path, "gps": meta.get("gps")}
+            self._seq += 1
+            self._total_selected += 1
+            changed |= self._insert_entry(entry)
+        changed |= self._trim_to_cap()  # in case the cap was lowered mid-capture
+        return sorted(self._buffer, key=lambda e: e["seq"]) if changed else None
 
     def _priority_key(self):
         """What "best" means when the buffer is full: disparity score under keyframe
@@ -354,11 +357,13 @@ class MappingSession:
         if self.mapper is None:
             return {"success": False, "error": "No model selected — choose a model first.",
                     "keyframe_count": 0}
-        self._drain()
         with self._paths_lock:
+            if self.tcp_server:
+                self._drain_locked()
             entries = sorted(self._buffer, key=lambda e: e["seq"])
             paths = [e["path"] for e in entries]
             self._reconstructed_gps = [e["gps"] for e in entries]
+            self._buffer.clear()
         if not paths:
             return {"success": False, "error": "No keyframes collected yet",
                     "keyframe_count": 0}
