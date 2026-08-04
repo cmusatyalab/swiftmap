@@ -136,12 +136,12 @@ class MappingTestClient:
                 len(image_bytes) + protocol.SIZE_NBYTES + protocol.GPS_NBYTES)
 
             # Receive the status reply.
-            response_data = protocol.recv_exact(self.socket, protocol.REPLY_NBYTES)
-            if response_data is None:
+            reply = protocol.recv_reply(self.socket)
+            if reply is None:
                 print("❌ Invalid response from server")
                 self.stats["errors"] += 1
                 return None
-            status_code, keyframe_count, total_frames = protocol.unpack_reply(response_data)
+            status_code, keyframe_count, total_frames, _payload = reply
 
             if status_code == protocol.STATUS_KEYFRAME:
                 self.stats["keyframes_selected"] += 1

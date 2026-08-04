@@ -175,6 +175,7 @@ class AutoMappingServer:
             preds = self.session.latest_predictions
             self.session.export_camera_poses()
             self.session.export_nfn_plan()
+            self._send_nfn_kml(target_dir)
             areas.export_model_input_images(preds, target_dir)
             areas.write_area_metadata(target_dir, area_tag, self.cfg.site, created, n,
                                       preds, self.session.gps_transform)
@@ -199,6 +200,31 @@ class AutoMappingServer:
         finally:
             self.session.clear_keyframes()
             self._processing = False
+
+    def _send_nfn_kml(self, target_dir):
+        """Queue the freshly planned NFN area polygon KML back to the connected engine.
+
+        Delivered on the engine's next per-frame reply (see the reply protocol), which
+        relays it to the Gabriel client.
+        """
+        path = os.path.join(target_dir, "next_flight_area.kml")
+        if not os.path.isfile(path):
+            print("[swiftmap-server] no NFN area KML to send back")
+            return
+        with open(path, "rb") as f:
+            self.session.send_to_client(f.read())
+        print("[swiftmap-server] queued NFN area KML for the next engine reply")
+
+    def clean_keyframes(self) -> dict:
+        """Discard the frames collected so far (the un-mapped queue). Backs the viewer's
+        "Clear frames" button. Refused while a mapping run is in progress."""
+        with self._lock:
+            if self._processing:
+                return {"error": "A mapping run is in progress; try again shortly."}
+            n = self.session.get_keyframe_count()
+            self.session.clear_keyframes()
+        print(f"[swiftmap-server] cleared {n} collected keyframe(s)")
+        return {"success": True, "cleared": int(n)}
 
     @staticmethod
     def _run_artifact(target_dir, name):

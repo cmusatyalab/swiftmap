@@ -14,11 +14,16 @@ Per frame, a client sends:
 The server replies:
 
     [ 24-byte  3x native-endian float64  status, keyframe_count, total_frames ]
+    [ 4-byte   big-endian uint32          payload length (0 when none)         ]
+    [ <payload length> bytes              optional payload (e.g. an NFN KML)    ]
 
-The reply is native-endian (``"3d"``) for backward compatibility with existing
-clients; the size/GPS fields are big-endian. All current peers are same-architecture,
-so this is consistent on the wire — keep the reply format in lockstep across the
-server, ``test_client``, and the SteelEagle engine if it is ever changed.
+The status header is native-endian (``"3d"``) for backward compatibility with existing
+clients; the size/GPS/payload-length fields are big-endian. The trailing payload is
+always length-prefixed (length 0 for an ordinary per-frame ack) so every reader can
+consume the whole reply; the server uses it to hand a freshly planned NFN area KML
+back to the engine. All current peers are same-architecture, so this is consistent on
+the wire — keep the reply format in lockstep across the server, ``test_client``, and
+the SteelEagle engine if it is ever changed.
 """
 
 import struct
@@ -30,10 +35,12 @@ TCP_PORT = 43322
 SIZE_FORMAT = "!I"    # 4-byte big-endian unsigned image-size header
 GPS_FORMAT = "!3d"    # 3x big-endian float64: lat, lon, alt
 REPLY_FORMAT = "3d"   # 3x native-endian float64: status, kf_count, total (legacy)
+PAYLOAD_LEN_FORMAT = "!I"  # 4-byte big-endian length of the trailing reply payload
 
 SIZE_NBYTES = struct.calcsize(SIZE_FORMAT)    # 4
 GPS_NBYTES = struct.calcsize(GPS_FORMAT)      # 24
-REPLY_NBYTES = struct.calcsize(REPLY_FORMAT)  # 24
+REPLY_NBYTES = struct.calcsize(REPLY_FORMAT)  # 24 (status header only)
+PAYLOAD_LEN_NBYTES = struct.calcsize(PAYLOAD_LEN_FORMAT)  # 4
 
 RECV_CHUNK = 4096  # max bytes per recv() while streaming a body
 
@@ -73,10 +80,40 @@ def unpack_gps(buf: bytes):
     return (lat, lon, alt)
 
 
-def pack_reply(status: float, keyframe_count: float, total_frames: float) -> bytes:
-    return struct.pack(REPLY_FORMAT, float(status), float(keyframe_count), float(total_frames))
+def pack_reply(status: float, keyframe_count: float, total_frames: float,
+               payload: bytes = b"") -> bytes:
+    """Pack a reply: the 3-float64 status header + a length-prefixed trailing payload.
+
+    ``payload`` is empty for an ordinary per-frame ack; the server passes an NFN area
+    KML here to deliver a freshly planned flight polygon back to the engine.
+    """
+    payload = payload or b""
+    return (struct.pack(REPLY_FORMAT, float(status), float(keyframe_count), float(total_frames))
+            + struct.pack(PAYLOAD_LEN_FORMAT, len(payload)) + payload)
 
 
 def unpack_reply(buf: bytes):
-    """Return (status, keyframe_count, total_frames) from a 24-byte reply."""
+    """Return (status, keyframe_count, total_frames) from the 24-byte status header."""
     return struct.unpack(REPLY_FORMAT, buf)
+
+
+def recv_reply(sock):
+    """Read a full reply (status header + length-prefixed payload) from ``sock``.
+
+    Returns ``(status, keyframe_count, total_frames, payload)`` (payload may be empty),
+    or None if the peer closes early.
+    """
+    head = recv_exact(sock, REPLY_NBYTES)
+    if head is None:
+        return None
+    status, kf, total = struct.unpack(REPLY_FORMAT, head)
+    len_buf = recv_exact(sock, PAYLOAD_LEN_NBYTES)
+    if len_buf is None:
+        return None
+    n = struct.unpack(PAYLOAD_LEN_FORMAT, len_buf)[0]
+    payload = b""
+    if n:
+        payload = recv_exact(sock, n)
+        if payload is None:
+            return None
+    return status, kf, total, payload

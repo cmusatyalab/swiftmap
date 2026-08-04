@@ -57,6 +57,8 @@ class MappingTCPServer:
         self.collected_keyframes = queue.Queue()
         self.total_frames_received = 0
         self.total_keyframes_selected = 0
+        self._outbound_lock = threading.Lock()
+        self._pending_payload = b""
         
         # Statistics
         self.stats = {
@@ -165,16 +167,18 @@ class MappingTCPServer:
             bool: True if sent successfully
         """
         try:
-            # Reply as 3 float64 (see protocol): status, keyframe_count, total_frames.
+            # Reply as 3 float64 (see protocol): status, keyframe_count, total_frames,
+            # plus any one-shot outbound payload (e.g. an NFN area KML) piggybacked here.
             kf, total = self.total_keyframes_selected, self.total_frames_received
+            payload = self._take_outbound()
             if status_code == "keyframe_selected":
-                response_data = protocol.pack_reply(protocol.STATUS_KEYFRAME, kf, total)
+                response_data = protocol.pack_reply(protocol.STATUS_KEYFRAME, kf, total, payload)
             elif status_code == "frame_skipped":
-                response_data = protocol.pack_reply(protocol.STATUS_SKIPPED, kf, total)
+                response_data = protocol.pack_reply(protocol.STATUS_SKIPPED, kf, total, payload)
             elif status_code == "error":
-                response_data = protocol.pack_reply(protocol.STATUS_ERROR, -1.0, -1.0)
+                response_data = protocol.pack_reply(protocol.STATUS_ERROR, -1.0, -1.0, payload)
             else:  # success
-                response_data = protocol.pack_reply(protocol.STATUS_SUCCESS, kf, total)
+                response_data = protocol.pack_reply(protocol.STATUS_SUCCESS, kf, total, payload)
 
             client_socket.sendall(response_data)
             
@@ -439,6 +443,17 @@ class MappingTCPServer:
         
         print("="*50)
     
+    def queue_outbound(self, payload: bytes):
+        """Stash a payload to piggyback on the next per-frame reply (delivered once)."""
+        with self._outbound_lock:
+            self._pending_payload = payload or b""
+
+    def _take_outbound(self) -> bytes:
+        """Pop the pending outbound payload (empty if none), clearing it."""
+        with self._outbound_lock:
+            payload, self._pending_payload = self._pending_payload, b""
+        return payload
+
     def clear_keyframes(self):
         """Clear all collected keyframes and temp files."""
         try:

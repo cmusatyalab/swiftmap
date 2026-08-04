@@ -313,6 +313,11 @@ class MappingSession:
         self._wipe_temp_dir()
         self._reset_stream_gps_csv()
 
+    def send_to_client(self, payload: bytes):
+        """Deliver payload back to the connected client"""
+        if self.tcp_server:
+            self.tcp_server.queue_outbound(payload)
+
     def configure_disparity_threshold(self, min_disparity: float):
         self.selector.configure_disparity_threshold(min_disparity)
 

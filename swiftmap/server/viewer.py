@@ -93,6 +93,12 @@ def build_viewer(server):
         return (msg, gr.update(choices=choices(), value=tag, interactive=True),
                 *gate(True), scene_glb, conf_glb, tag)
 
+    def do_clean():
+        res = server.clean_keyframes()
+        if res.get("success"):
+            return f"Cleared {res['cleared']} collected frame(s) from the queue."
+        return f"Cannot clear: {res.get('error', 'failed')}"
+
     def do_show(tag, level):
         return render(tag, level)
 
@@ -119,6 +125,7 @@ def build_viewer(server):
         with gr.Row():
             status = gr.Markdown("Waiting for the first area.")
             map_btn = gr.Button("Map now", variant="primary", scale=0, min_width=140)
+            clean_btn = gr.Button("Clear frames", scale=0, min_width=140)
             refresh_btn = gr.Button("Refresh areas", scale=0, min_width=140)
         map_status = gr.Markdown()
 
@@ -157,6 +164,7 @@ def build_viewer(server):
         refresh_btn.click(do_refresh, inputs=[area_dd], outputs=[area_dd, *gated])
         map_btn.click(do_map_now, inputs=[conf_level, last_latest],
                       outputs=[map_status, area_dd, *gated, recon, conf, last_latest])
+        clean_btn.click(do_clean, outputs=[map_status])
         show_btn.click(do_show, inputs=[area_dd, conf_level], outputs=[recon, conf])
         seg_btn.click(do_segment, inputs=[area_dd, query, conf_level], outputs=[seg_view, seg_status])
 
