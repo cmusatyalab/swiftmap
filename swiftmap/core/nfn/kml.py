@@ -32,7 +32,7 @@ _STYLE = """    <Style id="icon-1899-0288D1-nodesc-normal">
 
 def viewpoints_to_kml(viewpoints: List[Dict[str, Any]],
                       gps_key: str = "target_gps",
-                      doc_name: str = "SwiftMap NFN Targets") -> Optional[str]:
+                      doc_name: str = "nfn_pts") -> Optional[str]:
     """Build a single-layer KML string from viewpoints' GPS.
 
     Args:
@@ -72,7 +72,7 @@ def viewpoints_to_kml(viewpoints: List[Dict[str, Any]],
 
 def write_kml(viewpoints: List[Dict[str, Any]], path: str,
               gps_key: str = "target_gps",
-              doc_name: str = "SwiftMap NFN Targets") -> Optional[str]:
+              doc_name: str = "nfn_pts") -> Optional[str]:
     """Write viewpoints to a KML file. Returns the path, or None if nothing written."""
     kml = viewpoints_to_kml(viewpoints, gps_key=gps_key, doc_name=doc_name)
     if kml is None:
@@ -139,7 +139,7 @@ def _order_ring(latlons: List[tuple]) -> List[tuple]:
 
 def polygon_to_kml(viewpoints: List[Dict[str, Any]],
                    gps_key: str = "target_gps",
-                   doc_name: str = "SwiftMap NFN Area",
+                   doc_name: str = "nfn_area",
                    layer_name: str = "Untitled layer",
                    placemark_name: str = "NFN Coverage") -> Optional[str]:
     """Build a polygon KML whose ring vertices are the viewpoints' target GPS.
@@ -188,7 +188,7 @@ def polygon_to_kml(viewpoints: List[Dict[str, Any]],
 
 def write_polygon_kml(viewpoints: List[Dict[str, Any]], path: str,
                       gps_key: str = "target_gps",
-                      doc_name: str = "SwiftMap NFN Area") -> Optional[str]:
+                      doc_name: str = "nfn_area") -> Optional[str]:
     """Write a polygon (area) KML from viewpoints' target GPS. Returns path or None."""
     kml = polygon_to_kml(viewpoints, gps_key=gps_key, doc_name=doc_name)
     if kml is None:

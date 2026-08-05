@@ -680,9 +680,9 @@ class MappingSession:
             # target points.
             from swiftmap.core.nfn import kml
             kml.write_kml(viewpoints, os.path.join(target_dir, "next_flight_viewpoints.kml"),
-                          gps_key="target_gps", doc_name="SwiftMap NFN Targets")
+                          gps_key="target_gps", doc_name="nfn_pts")
             kml.write_polygon_kml(viewpoints, os.path.join(target_dir, "next_flight_area.kml"),
-                                  gps_key="target_gps", doc_name="SwiftMap NFN Area")
+                                  gps_key="target_gps", doc_name="nfn_area")
 
         return path
 
