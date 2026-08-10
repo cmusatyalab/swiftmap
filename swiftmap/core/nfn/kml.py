@@ -141,7 +141,7 @@ def polygon_to_kml(viewpoints: List[Dict[str, Any]],
                    gps_key: str = "target_gps",
                    doc_name: str = "nfn_area",
                    layer_name: str = "Untitled layer",
-                   placemark_name: str = "NFN Coverage") -> Optional[str]:
+                   placemark_name: str = "nfn_target_area") -> Optional[str]:
     """Build a polygon KML whose ring vertices are the viewpoints' target GPS.
 
     Needs at least 3 GPS-tagged targets to form a polygon; returns None otherwise.
