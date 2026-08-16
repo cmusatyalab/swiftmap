@@ -4,7 +4,7 @@
 TCP Server for SwiftMap Mapping System
 
 Receives images (+ paired GPS) from drone clients via TCP, runs keyframe selection,
-and replies with mapping status. The wire format lives in ``swiftmap.core.protocol``.
+and replies with mapping status. The wire format lives in ``swiftmap.core.transport.protocol``.
 """
 
 import socket
@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Optional, Callable, Dict, Any
 import os
 
-from swiftmap.core import protocol
+from swiftmap.core.transport import protocol
 
 
 class MappingTCPServer:
