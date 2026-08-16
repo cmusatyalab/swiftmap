@@ -9,6 +9,7 @@ all of them:
 
     collection :  MappingTCPServer (transport) + KeyframeSelector (decision)
     mapping    :  VGGTMapper       (reconstruction + confidence)
+    alignment  :  GpsTransformer   (local -> GPS)
     planning   :  NextFlightPlanner (NFN)
 
 The pipeline for a run:
@@ -40,6 +41,7 @@ from swiftmap.core.transport.tcp_server import MappingTCPServer
 from swiftmap.core.pipeline.reconstructor import get_mapper, available_mappers, is_registered
 from swiftmap.core.pipeline.segmentor import get_segmenter, available_segmenters, lift
 from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner
+from swiftmap.core.pipeline.gps_transformer import GpsTransformer
 
 
 class MappingSession:
@@ -59,6 +61,7 @@ class MappingSession:
         self.backbone: Optional[str] = None
         self.mapper = None
         self.planner = NextFlightPlanner()
+        self.aligner = GpsTransformer()
 
         # Text-promptable segmentation (SAM 3), built lazily on first segment().
         self.segmenter = None
@@ -511,14 +514,12 @@ class MappingSession:
         Returns the transform config (scale, rotation, translation, origin, rmse),
         or {'error': ...} on failure.
         """
-        from swiftmap.core.pipeline.gps_transformer import gps_transformer as geo
-
         preds = self.latest_predictions
         if not preds or "camera_positions" not in preds:
             return {"error": "No reconstruction with camera poses yet — process keyframes first."}
 
         if isinstance(gps_lla, str):
-            gps_lla = geo.load_gps_csv(gps_lla)
+            gps_lla = self.aligner.load_gps_csv(gps_lla)
 
         slam_xyz = np.asarray(preds["camera_positions"]).reshape(-1, 3)
         gps_arr = np.asarray(gps_lla, dtype=float).reshape(-1, 3)
@@ -531,7 +532,7 @@ class MappingSession:
                               f"'GPS synced 1:1' to use ICP.")}
 
         try:
-            self.gps_transform, cfg = geo.from_calibration(
+            self.gps_transform, cfg = self.aligner.from_calibration(
                 slam_xyz, gps_arr, use_icp=use_icp)
         except Exception as e:
             return {"error": f"GPS alignment failed: {e}"}
@@ -547,8 +548,6 @@ class MappingSession:
         poses of the last reconstruction) and does a single direct Umeyama fit --
         no CSV upload, no ICP. Run after reconstruct().
         """
-        from swiftmap.core.pipeline.gps_transformer import gps_transformer as geo
-
         preds = self.latest_predictions
         if not preds or "camera_positions" not in preds:
             return {"error": "No reconstruction with camera poses yet — process keyframes first."}
@@ -567,7 +566,7 @@ class MappingSession:
         gps_arr = np.array([g for _, g in pairs], dtype=float)
 
         try:
-            self.gps_transform, cfg = geo.from_calibration(
+            self.gps_transform, cfg = self.aligner.from_calibration(
                 slam, gps_arr, use_icp=False)
         except Exception as e:
             return {"error": f"GPS alignment failed: {e}"}
