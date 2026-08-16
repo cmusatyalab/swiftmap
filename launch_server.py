@@ -36,7 +36,8 @@ repo_root = os.path.dirname(os.path.abspath(__file__))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from swiftmap.core import constants, protocol
+from swiftmap.core import constants
+from swiftmap.core.transport import protocol
 from swiftmap.server import AutoMappingServer, ServerConfig
 
 
