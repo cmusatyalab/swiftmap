@@ -56,7 +56,7 @@ SAM3_BPE_PATH = os.environ.get(
     "/home/ubuntu/xianglic/sam3/assets/bpe_simple_vocab_16e6.txt.gz")
 # Minimum SAM 3 instance confidence to keep a mask.
 SAM3_CONF_THRESHOLD = float(os.environ.get("SAM3_CONF_THRESHOLD", "0.5"))
-# Default segmentation backend (registered in swiftmap.core.segmentation).
+# Default segmentation backend (registered in swiftmap.core.pipeline.segmentor).
 DEFAULT_SEGMENTER = os.environ.get("SWIFTMAP_SEGMENTER", "sam3")
 
 # --- Segmented-object clustering (v1: spatial) -----------------------------

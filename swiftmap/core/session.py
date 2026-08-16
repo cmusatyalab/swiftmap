@@ -33,12 +33,13 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-from swiftmap.core import constants, protocol
-from swiftmap.core.keyframe_selector import KeyframeSelector
-from swiftmap.core.tcp_server import MappingTCPServer
-from swiftmap.core.mapper import get_mapper, available_mappers, is_registered
-from swiftmap.core.segmentation import get_segmenter, available_segmenters, lift
-from swiftmap.core.nfn import NextFlightPlanner
+from swiftmap.core import constants
+from swiftmap.core.transport import protocol
+from swiftmap.core.pipeline.keyframe_selector import KeyframeSelector
+from swiftmap.core.transport.tcp_server import MappingTCPServer
+from swiftmap.core.pipeline.reconstructor import get_mapper, available_mappers, is_registered
+from swiftmap.core.pipeline.segmentor import get_segmenter, available_segmenters, lift
+from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner
 
 
 class MappingSession:
@@ -348,7 +349,7 @@ class MappingSession:
 
     def set_segmenter(self, name: str) -> Dict[str, Any]:
         """Select the segmentation backend by key (e.g. 'sam3'); built lazily."""
-        from swiftmap.core.segmentation import is_registered as seg_registered
+        from swiftmap.core.pipeline.segmentor import is_registered as seg_registered
         if not seg_registered(name):
             return {"error": f"Unknown segmentation model '{name}'."}
         if getattr(self.segmenter, "name", None) == name:
@@ -510,7 +511,7 @@ class MappingSession:
         Returns the transform config (scale, rotation, translation, origin, rmse),
         or {'error': ...} on failure.
         """
-        from swiftmap.core.geo_transform import geo
+        from swiftmap.core.pipeline.gps_transformer import gps_transformer as geo
 
         preds = self.latest_predictions
         if not preds or "camera_positions" not in preds:
@@ -530,7 +531,7 @@ class MappingSession:
                               f"'GPS synced 1:1' to use ICP.")}
 
         try:
-            self.gps_transform, cfg = geo.GpsTransform.from_calibration(
+            self.gps_transform, cfg = geo.from_calibration(
                 slam_xyz, gps_arr, use_icp=use_icp)
         except Exception as e:
             return {"error": f"GPS alignment failed: {e}"}
@@ -546,7 +547,7 @@ class MappingSession:
         poses of the last reconstruction) and does a single direct Umeyama fit --
         no CSV upload, no ICP. Run after reconstruct().
         """
-        from swiftmap.core.geo_transform import geo
+        from swiftmap.core.pipeline.gps_transformer import gps_transformer as geo
 
         preds = self.latest_predictions
         if not preds or "camera_positions" not in preds:
@@ -566,7 +567,7 @@ class MappingSession:
         gps_arr = np.array([g for _, g in pairs], dtype=float)
 
         try:
-            self.gps_transform, cfg = geo.GpsTransform.from_calibration(
+            self.gps_transform, cfg = geo.from_calibration(
                 slam, gps_arr, use_icp=False)
         except Exception as e:
             return {"error": f"GPS alignment failed: {e}"}
@@ -626,66 +627,15 @@ class MappingSession:
         return target_dir
 
     def export_nfn_plan(self) -> Optional[str]:
-        """Write the latest NFN plan (GPS-tagged when aligned) to the run dir.
-
-        Writes ``next_flight_viewpoints.json`` (+ ``transform.json`` if GPS-aligned)
-        and returns the viewpoints path, or None if there's no plan yet.
-        """
+        """Write the latest NFN plan (GPS-tagged when aligned) to the run dir."""
         if not self.latest_plan:
             return None
-        import json
-
-        target_dir = self._target_dir()
-        viewpoints = []
-        for i, vp in enumerate(self.latest_plan.get("viewpoints", [])):
-            item = {
-                "id": i,                                   # matches Viser "v{i}" and the log "#{i}"
-                "cluster_id": int(vp.get("cluster_id", -1)),  # which ground-plane cell (not the marker label)
-                "position": np.asarray(vp["camera_position"], dtype=float).tolist(),
-                "look_dir": np.asarray(vp["camera_rotation"], dtype=float)[:, 2].tolist(),
-                "target": np.asarray(vp["target"], dtype=float).tolist(),
-                "score": float(vp.get("score", 0.0)),
-            }
-            if "camera_position_gps" in vp:
-                item["position_gps"] = vp["camera_position_gps"]  # drone waypoint [lat, lon, 0]
-            if "target_gps" in vp:
-                item["target_gps"] = vp["target_gps"]            # ground patch [lat, lon, 0]
-            viewpoints.append(item)
-
-        out = {
-            "num_viewpoints": len(viewpoints),
-            "thresholds": self.latest_plan.get("thresholds", {}),
-            "gps_aligned": self.gps_transform is not None,
-            "viewpoints": viewpoints,
-        }
-
-        # Extra section: one GPS point per segmented object, folded into the plan.
-        seg_items = self._segmented_object_items()
-        if seg_items:
-            out["segmented_objects"] = {
-                "query": self.latest_segmentation.get("query"),
-                "num_objects": len(seg_items),
-                "objects": seg_items,
-            }
-
-        path = os.path.join(target_dir, "next_flight_viewpoints.json")
-        with open(path, "w") as f:
-            json.dump(out, f, indent=2)
-
-        if self.gps_transform is not None:
-            with open(os.path.join(target_dir, "transform.json"), "w") as f:
-                json.dump(self.gps_transform.cfg, f, indent=2)
-            # KML of the target (ground) GPS, ready to import into Google My Maps:
-            # point pins, plus a polygon (area) layer whose ring vertices are the
-            # target points.
-            from swiftmap.core.nfn import kml
-            kml.write_kml(viewpoints, os.path.join(target_dir, "next_flight_viewpoints.kml"),
-                          gps_key="target_gps", doc_name="nfn_pts")
-            kml.write_polygon_kml(viewpoints, os.path.join(target_dir, "next_flight_area.kml"),
-                                  gps_key="target_gps", doc_name="nfn_area")
-
-        return path
-
+        from swiftmap.core.database import write_nfn_plan, write_segmented_objects
+        seg = self.latest_segmentation
+        return write_nfn_plan(
+            self.latest_plan, self.gps_transform, self._target_dir(),
+            segmented=self._segmented_object_items(),
+            seg_query=seg.get("query") if seg else None)
     # ================================================================ export stage
     def _segmented_object_items(self) -> List[Dict[str, Any]]:
         """Serializable per-object records for the latest segmentation.
@@ -711,50 +661,21 @@ class MappingSession:
         return items
 
     def export_segmented_objects(self) -> Optional[str]:
-        """Write ``segmented_objects.json`` (+ KML when aligned) to the run dir.
-
-        Standalone counterpart to the segmented section of the NFN plan, so the
-        objects can be exported without running NFN. Returns the path, or None if
-        there is no segmentation yet.
-        """
+        """Write ``segmented_objects.json`` (+ KML when aligned) to the run dir."""
         seg = self.latest_segmentation
         items = self._segmented_object_items()
         if not items:
             return None
-        import json
-        target_dir = seg.get("target_dir") or self._target_dir()
-        out = {
-            "query": seg.get("query"),
-            "conf_threshold": seg.get("conf_threshold"),
-            "gps_aligned": self.gps_transform is not None,
-            "num_objects": len(items),
-            "objects": items,
-        }
-        path = os.path.join(target_dir, "segmented_objects.json")
-        with open(path, "w") as f:
-            json.dump(out, f, indent=2)
-        gps_items = [s for s in items if "position_gps" in s]
-        if gps_items:
-            from swiftmap.core.nfn import kml
-            kml.write_kml(gps_items, os.path.join(target_dir, "segmented_objects.kml"),
-                          gps_key="position_gps",
-                          doc_name=f"SwiftMap Segmented: {seg.get('query')}")
-        return path
-
+        from swiftmap.core.database import write_nfn_plan, write_segmented_objects
+        return write_segmented_objects(
+            items, seg.get("query"), seg.get("conf_threshold"),
+            self.gps_transform, seg.get("target_dir") or self._target_dir())
     def export_camera_poses(self) -> Optional[str]:
         """Write estimated camera poses to the run's output dir; return the path."""
         if not self.latest_predictions:
             return None
-        latest = self.get_latest_results()
-        target_dir = latest.get("scene_results", {}).get("target_directory")
-        if not target_dir:
-            target_dir = f"input_stream_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            os.makedirs(target_dir, exist_ok=True)
-        poses_path = os.path.join(target_dir, "camera_poses.json")
-        if self.mapper.save_camera_poses_json(poses_path):
-            return poses_path
-        return None
-
+        poses_path = os.path.join(self._target_dir(), "camera_poses.json")
+        return poses_path if self.mapper.save_camera_poses_json(poses_path) else None
     # ======================================================================= stats
     def get_stats(self) -> Dict[str, Any]:
         """Combined session statistics (selection + transport)."""

@@ -65,18 +65,22 @@ swift_map/
 ├── pyproject.toml            # deps (uv); model backbones are optional extras
 ├── swiftmap/
 │   ├── core/
-│   │   ├── session.py            # MappingSession — orchestrates every stage
-│   │   ├── tcp_server.py         # TCP frame+GPS ingest
-│   │   ├── protocol.py           # wire protocol (single source of truth)
-│   │   ├── keyframe_selector/    # optical-flow keyframe selection
-│   │   ├── mapper/               # pluggable reconstruction backbones
-│   │   │   ├── base.py           #   BaseMapper + registry
-│   │   │   ├── backends/         #   vggt.py, vggt_omega.py
-│   │   │   └── postprocess / scene_export / confidence_mapping / geometry
-│   │   ├── semantic/             # text-prompt segmentation (SAM 3) + 3D lift
-│   │   ├── nfn/                  # Next Flight Navigation planner + KML export
-│   │   └── geo_transform/        # local ↔ GPS (Umeyama / ICP)
-│   ├── server/                   # headless AutoMappingServer
+│   │   ├── session.py            # MappingSession — request-driven orchestrator
+│   │   ├── constants.py
+│   │   ├── primitives/           # shared leaf: geometry.py + types.py
+│   │   │                         #   (MapData, Georeference, Reconstruction; point/scene primitives)
+│   │   ├── database/             # map.py — the map store (Map: load/render/segment/write/merge)
+│   │   ├── transport/            # protocol.py (wire protocol) + tcp_server.py (TCP frame+GPS ingest)
+│   │   └── pipeline/             # per-stage operations, built on primitives
+│   │       ├── keyframe_selector/    # optical-flow keyframe selection
+│   │       ├── reconstructor/        # pluggable reconstruction backbones
+│   │       │   ├── base.py           #   BaseMapper + registry
+│   │       │   ├── backends/         #   vggt.py, vggt_omega.py
+│   │       │   └── postprocess / scene_export / confidence_mapping / sky_mask
+│   │       ├── gps_transformer/      # local ↔ GPS (Umeyama / ICP)
+│   │       ├── segmentor/            # text-prompt segmentation (SAM 3) + 3D lift
+│   │       └── next_flight_planner/  # Next Flight Navigation planner + KML export
+│   ├── server/                   # headless AutoMappingServer (grow-and-merge)
 │   └── frontend/                 # Gradio GUI + Viser NFN viewer
 └── test/test_client.py       # streaming test client
 ```

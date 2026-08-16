@@ -23,7 +23,8 @@ vggt_root = os.path.dirname(os.path.dirname(current_dir))
 if vggt_root not in sys.path:
     sys.path.append(vggt_root)
 
-from swiftmap.core import constants, protocol
+from swiftmap.core import constants
+from swiftmap.core.transport import protocol
 from swiftmap.core.session import MappingSession
 
 # GPS alignment method choices (radio labels).

@@ -1,38 +1,38 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""Headless auto-mapping server.
+"""Headless auto-mapping server (grow-and-merge).
 
 A long-lived ``MappingSession`` collects frame+GPS pairs over TCP. A background
 monitor watches the retained keyframe count; once it reaches the cap, the server
-maps that batch into an *area* and writes everything to the output dir:
+reconstructs that batch and **merges it into a single growing** ``Map``:
 
-    reconstruct (VGGT / VGGT-Omega)
-      -> GPS-align from the streamed pairs (if GPS was sent)
-      -> NFN next-flight plan
-      -> export: scene/ply/npz, model-input images, camera poses,
-                 NFN json+kml+area kml, and an area.json (tag + GPS center/geohash)
+    reconstruct (VGGT / VGGT-Omega) -> GPS-align -> NFN plan
+      -> merge the batch into the current growing map (GPS co-registration,
+         origin pinned so coordinates never drift, near-duplicate points collapsed)
+      -> write the merged map (Map.write), inherit the old map's segmentation,
+         and delete the old + batch dirs.
 
-Segmentation is **not** part of this loop — it is a separate, request-driven
-service (``segment_area``): a client asks to segment a query on an area tag, and
-the server reloads that area from disk and runs the segmenter (see ``areas.py``).
+There is one *current* ``Map`` at a time. On startup the server resumes the latest
+existing map (or the operator selects one via ``set_growing_map``); with none, the
+first batch creates it. Segmentation is request-driven and carried forward on merge.
 
-Everything is written under the process working directory (each run creates an
-``<area_tag>/`` folder), so pointing the container's working dir at a mounted
-volume puts every export on the host.
-
-Config comes from ``ServerConfig`` (populated from env/CLI in ``launch_server``).
+Everything is written under the process working directory; pointing the container's
+working dir at a mounted volume puts the growing map on the host.
 """
 
 import os
+import shutil
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 
-from swiftmap.core import constants, protocol
+from swiftmap.core import constants
+from swiftmap.core.transport import protocol
+from swiftmap.core.database import Map
+from swiftmap.core.primitives.types import MapData
 from swiftmap.core.session import MappingSession
-from swiftmap.server import areas
 
 
 @dataclass
@@ -41,9 +41,10 @@ class ServerConfig:
     port: int = protocol.TCP_PORT
     backbone: str = "vggt"
     segmenter: str = "sam3"
-    site: str = "area"
+    site: str = "map"
     max_keyframes: int = constants.DEFAULT_MAX_KEYFRAMES
     conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD
+    merge_voxel: float = 0.1
     mask_sky: bool = True
     mask_dynamic: bool = False
     keep_all: bool = False
@@ -55,7 +56,9 @@ class ServerConfig:
 
 
 class AutoMappingServer:
-    """Collects keyframes over TCP and auto-runs the pipeline at the cap."""
+    """Collects keyframes over TCP and grows one merged ``Map`` at the cap."""
+
+    _STAGING = "_staging"
 
     def __init__(self, config: ServerConfig):
         self.cfg = config
@@ -75,12 +78,23 @@ class AutoMappingServer:
         self._run_idx = 0
         self._stop = threading.Event()
 
+        self._current: Optional[Map] = None
+        self._init_current_map()
+
+    def _init_current_map(self):
+        """Resume growth of the latest existing map on disk, if any."""
+        existing = Map.list(self._root)
+        if existing:
+            self._current = existing[0]
+            print(f"[swiftmap-server] resuming growth of existing map '{self._current.tag}'")
+
     def run(self):
-        """Start collecting and block, running the pipeline whenever the cap fills."""
+        """Start collecting and block, growing the map whenever the cap fills."""
         print(f"[swiftmap-server] starting on {self.cfg.host}:{self.cfg.port}")
         print(f"[swiftmap-server] site={self.cfg.site} backbone={self.cfg.backbone} "
-              f"segmenter={self.cfg.segmenter} cap={self.cfg.max_keyframes}")
-        print(f"[swiftmap-server] areas -> {self._root}")
+              f"segmenter={self.cfg.segmenter} cap={self.cfg.max_keyframes} "
+              f"merge_voxel={self.cfg.merge_voxel} m")
+        print(f"[swiftmap-server] maps -> {self._root}")
 
         if not self.session.start(port=self.cfg.port, keep_all=self.cfg.keep_all):
             raise RuntimeError("Failed to start the TCP collection server")
@@ -95,7 +109,7 @@ class AutoMappingServer:
             self.session.stop()
 
     def _monitor_loop(self):
-        """Poll the retained keyframe count; run the pipeline when it hits the cap."""
+        """Poll the retained keyframe count; grow the map when it hits the cap."""
         while not self._stop.is_set():
             count = self.session.get_keyframe_count()
             if not self._processing and count >= self.cfg.max_keyframes:
@@ -105,15 +119,13 @@ class AutoMappingServer:
     _MIN_KEYFRAMES = 1
 
     def _run_pipeline(self):
-        """Map one batch into an area: reconstruct -> GPS-align -> NFN -> export."""
         with self._lock:
             self._run_pipeline_locked()
 
     def map_now(self) -> dict:
-        """Force-map the current (partial) batch immediately, then start a fresh one.
+        """Force-map the current (partial) batch immediately and merge it in.
 
-        Backs the viewer's "Map now" button — maps whatever keyframes are retained
-        so far without waiting for the cap. Serialized against the auto-loop.
+        Backs the viewer's "Map now" button. Serialized against the auto-loop.
         """
         with self._lock:
             if self._processing:
@@ -125,7 +137,7 @@ class AutoMappingServer:
             self._run_pipeline_locked()
         lr = self.latest_run
         if lr:
-            return {"success": True, "area_tag": lr.get("area_tag"),
+            return {"success": True, "map_tag": lr.get("map_tag"),
                     "num_keyframes": lr.get("num_keyframes"),
                     "num_viewpoints": lr.get("num_viewpoints")}
         return {"error": "Mapping produced no result (check the server logs)."}
@@ -137,12 +149,12 @@ class AutoMappingServer:
         t0 = time.time()
         n = self.session.get_keyframe_count()
         created = datetime.now()
-        area_tag = areas.make_area_tag(self.cfg.site, created)
-        print(f"\n[swiftmap-server] === run #{run}: cap reached ({n} keyframes) "
-              f"-> area '{area_tag}' ===")
+        staging = os.path.join(self._root, self._STAGING)
+        shutil.rmtree(staging, ignore_errors=True)
+        print(f"\n[swiftmap-server] === run #{run}: {n} keyframes -> batch ===")
         try:
             params = {
-                "output_name": area_tag,
+                "output_name": self._STAGING,
                 "conf_threshold": float(self.cfg.conf_threshold),
                 "mask_sky": self.cfg.mask_sky,
                 "mask_dynamic": self.cfg.mask_dynamic,
@@ -155,49 +167,62 @@ class AutoMappingServer:
                 print(f"[swiftmap-server] run #{run} reconstruction failed: "
                       f"{result.get('error')}")
                 return
-            target_dir = result.get("scene_results", {}).get("target_directory")
+            target_dir = result.get("scene_results", {}).get("target_directory") or staging
 
-            if self.session.has_stream_gps():
-                cfg = self.session.align_gps(use_icp=False)
-                if "error" in cfg:
-                    print(f"[swiftmap-server] GPS align skipped: {cfg['error']}")
-                else:
-                    print(f"[swiftmap-server] GPS aligned "
-                          f"(RMSE {cfg.get('rmse', float('nan')):.2f} m)")
-            else:
-                print("[swiftmap-server] no streamed GPS — exports stay in local coords")
+            if not self.session.has_stream_gps():
+                print("[swiftmap-server] grow mode requires GPS; no streamed GPS -> batch dropped")
+                return
+            cfg = self.session.align_gps(use_icp=False)
+            if "error" in cfg:
+                print(f"[swiftmap-server] GPS align failed ({cfg['error']}) -> batch dropped")
+                return
+            print(f"[swiftmap-server] GPS aligned (RMSE {cfg.get('rmse', float('nan')):.2f} m)")
 
             plan = self.session.plan(low_percentile=constants.NFN_LOW_PERCENTILE,
                                      high_percentile=constants.NFN_HIGH_PERCENTILE)
             print(f"[swiftmap-server] NFN: "
                   f"{plan.get('error') or str(plan.get('num_viewpoints', 0)) + ' viewpoints'}")
-
-            preds = self.session.latest_predictions
             self.session.export_camera_poses()
             self.session.export_nfn_plan()
             self._send_nfn_kml(target_dir)
-            areas.export_model_input_images(preds, target_dir)
-            areas.write_area_metadata(target_dir, area_tag, self.cfg.site, created, n,
-                                      preds, self.session.gps_transform)
-            print(f"[swiftmap-server] run #{run} exported area '{area_tag}' "
-                  f"in {time.time() - t0:.1f}s")
+
+            batch = Map(target_dir)
+            old = self._current if (self._current and self._current.exists()) else None
+            tag = Map.tag_for(self.cfg.site, created)
+            if old:
+                # grow the current map with this batch (co-register, merge, inherit, cleanup)
+                new = old.merge(batch, conf_thres=self.cfg.conf_threshold,
+                                voxel_size=self.cfg.merge_voxel, site=self.cfg.site,
+                                tag=tag, created=created)
+                print(f"[swiftmap-server] grew '{new.tag}', removed old map '{old.tag}'")
+            else:
+                # first map: normalize the batch into the store (single-map merge)
+                merged = MapData.merge([batch.load(self.cfg.conf_threshold)],
+                                       voxel_size=self.cfg.merge_voxel)
+                new = Map.write(merged, self._root, self.cfg.site, ["batch"], tag=tag,
+                                created=created, voxel_size=self.cfg.merge_voxel)
+            self._current = new
+            n_points = int(new.metadata.get("num_points", 0))
+            n_cameras = len(new.frames)
 
             self.latest_run = {
-                "run": run, "area_tag": area_tag,
-                "target_dir": os.path.abspath(target_dir),
-                "scene_glb": self._run_artifact(target_dir, "scene.glb"),
-                "confidence_glb": self._run_artifact(target_dir, "confidence_map.glb"),
-                "num_keyframes": n,
+                "run": run, "map_tag": new.tag, "target_dir": new.path,
+                "num_keyframes": n_cameras,
+                "num_points": n_points,
                 "num_viewpoints": plan.get("num_viewpoints", 0) if isinstance(plan, dict) else 0,
-                "gps_aligned": self.session.gps_transform is not None,
-                "elapsed": time.time() - t0,
+                "gps_aligned": True, "elapsed": time.time() - t0,
+                "grew": bool(old),
             }
+            print(f"[swiftmap-server] run #{run}: {'grew' if old else 'created'} map "
+                  f"'{new.tag}' -> {n_points:,} pts, {n_cameras} cameras "
+                  f"in {time.time() - t0:.1f}s")
 
         except Exception as e:
             import traceback
             print(f"[swiftmap-server] run #{run} pipeline error: {e}")
             traceback.print_exc()
         finally:
+            shutil.rmtree(staging, ignore_errors=True)
             self.session.clear_keyframes()
             self._processing = False
 
@@ -226,11 +251,15 @@ class AutoMappingServer:
         print(f"[swiftmap-server] cleared {n} collected keyframe(s)")
         return {"success": True, "cleared": int(n)}
 
-    @staticmethod
-    def _run_artifact(target_dir, name):
-        """Absolute path to a run artifact if it exists, else None."""
-        p = os.path.abspath(os.path.join(target_dir, name))
-        return p if os.path.exists(p) else None
+    def set_growing_map(self, map_tag: str) -> dict:
+        """Point the grow loop at an existing map (the operator's chosen target)."""
+        a = Map.get(self._root, map_tag)
+        if a is None:
+            return {"error": f"Unknown map '{map_tag}'."}
+        with self._lock:
+            self._current = a
+        print(f"[swiftmap-server] growing target set to '{map_tag}'")
+        return {"success": True, "map_tag": map_tag}
 
     def _start_viewer(self):
         """Launch the passive Gradio results viewer (non-blocking); headless if it fails."""
@@ -243,40 +272,48 @@ class AutoMappingServer:
             print(f"[swiftmap-server] viewer disabled ({e}); running headless")
 
     def viewer_state(self) -> dict:
-        """Snapshot of the latest run for the viewer, plus live status."""
+        """Snapshot of the growing map for the viewer, plus live status."""
         state = dict(self.latest_run)
         state["processing"] = self._processing
         state["keyframes"] = self.session.get_keyframe_count()
         state["cap"] = self.cfg.max_keyframes
+        state["current_map"] = self._current.tag if self._current else None
         return state
 
-    def list_area_tags(self) -> List[str]:
-        """Area tags available (newest first)."""
-        return [m["area_tag"] for m in areas.list_areas(self._root)]
+    def list_map_tags(self) -> List[str]:
+        """Map tags available (newest first)."""
+        return [a.tag for a in Map.list(self._root)]
 
-    def latest_area_tag(self) -> Optional[str]:
-        tag = self.latest_run.get("area_tag") if self.latest_run else None
-        if tag:
-            return tag
-        tags = self.list_area_tags()
+    def current_map_tag(self) -> Optional[str]:
+        """The map currently being grown (the merge target)."""
+        return self._current.tag if self._current else None
+
+    def latest_map_tag(self) -> Optional[str]:
+        if self._current:
+            return self._current.tag
+        tags = self.list_map_tags()
         return tags[0] if tags else None
 
-    def render_area(self, area_tag: str, conf_level: float) -> dict:
-        """Reconstruction + confidence-at-``conf_level`` GLBs for a stored area."""
+    def render_map(self, map_tag: str, conf_level: float) -> dict:
+        """Reconstruction + confidence-at-``conf_level`` GLBs for a stored map."""
         with self._lock:
-            return areas.render_area(self._root, area_tag, conf_level)
+            a = Map.get(self._root, map_tag)
+            if a is None:
+                return {"error": f"Unknown map '{map_tag}'."}
+            return a.render(conf_level)
 
-    def segment_area(self, area_tag: str, query: str, conf_level: float = None) -> dict:
-        """Segment ``query`` on a stored ``area_tag`` at ``conf_level`` (request-driven).
+    def segment_map(self, map_tag: str, query: str, conf_level: float = None) -> dict:
+        """Segment ``query`` on a stored ``map_tag`` at ``conf_level`` (request-driven).
 
-        Decoupled from the mission loop: reloads the area from disk. Serialized
-        against the auto-pipeline only because they share the GPU. The returned
-        ``glb_path`` is made absolute so the viewer can serve it.
+        A merged map returns its inherited segmentation (no per-frame images). The
+        returned ``glb_path`` is made absolute so the viewer can serve it.
         """
         conf = self.cfg.conf_threshold if conf_level is None else float(conf_level)
         with self._lock:
-            res = areas.segment_area(self._root, area_tag, query,
-                                     self.session.segmenter, conf)
+            a = Map.get(self._root, map_tag)
+            if a is None:
+                return {"error": f"Unknown map '{map_tag}'."}
+            res = a.segment(query, self.session.segmenter, conf)
         glb = res.get("glb_path")
         if glb and not os.path.isabs(glb):
             res["glb_path"] = os.path.abspath(glb)

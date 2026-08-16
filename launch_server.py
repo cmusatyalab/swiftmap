@@ -17,6 +17,7 @@ Config is read from env vars (below), overridable by CLI flags:
     SWIFTMAP_SITE            area-tag prefix           (default area)
     SWIFTMAP_MAX_KEYFRAMES   cap that triggers a run   (default 70)
     SWIFTMAP_CONF_THRESHOLD  confidence percentile     (default 60)
+    SWIFTMAP_MERGE_VOXEL     grow-merge voxel size (m) (default 0.1)
     SWIFTMAP_MASK_SKY        true|false                (default true)
     SWIFTMAP_KEEP_ALL        keep every frame          (default false)
     SWIFTMAP_OUTPUT_DIR      export dir (mount this)   (default output)
@@ -64,6 +65,9 @@ def main() -> int:
                    default=int(_env("SWIFTMAP_MAX_KEYFRAMES", constants.DEFAULT_MAX_KEYFRAMES)))
     p.add_argument("--conf-threshold", type=float,
                    default=float(_env("SWIFTMAP_CONF_THRESHOLD", constants.DEFAULT_CONF_THRESHOLD)))
+    p.add_argument("--merge-voxel", type=float,
+                   default=float(_env("SWIFTMAP_MERGE_VOXEL", 0.1)),
+                   help="voxel size (m) for merging each batch into the growing area")
     p.add_argument("--mask-sky", type=lambda s: str(s).lower() in ("1", "true", "yes", "on"),
                    default=_env_bool("SWIFTMAP_MASK_SKY", True))
     p.add_argument("--keep-all", action="store_true", default=_env_bool("SWIFTMAP_KEEP_ALL", False))
@@ -78,6 +82,7 @@ def main() -> int:
         backbone=args.backbone, segmenter=args.segmenter, site=args.site,
         max_keyframes=args.max_keyframes,
         conf_threshold=args.conf_threshold,
+        merge_voxel=args.merge_voxel,
         mask_sky=args.mask_sky, keep_all=args.keep_all,
         output_dir=args.output_dir,
         viewer_host=args.viewer_host, viewer_port=args.viewer_port,

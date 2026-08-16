@@ -11,11 +11,11 @@ SwiftMap core components:
 """
 
 from swiftmap.core.session import MappingSession
-from swiftmap.core.tcp_server import MappingTCPServer
-from swiftmap.core.keyframe_selector import KeyframeSelector
-from swiftmap.core.mapper import (
+from swiftmap.core.transport.tcp_server import MappingTCPServer
+from swiftmap.core.pipeline.keyframe_selector import KeyframeSelector
+from swiftmap.core.pipeline.reconstructor import (
     BaseMapper, VGGTMapper, VGGTOmegaMapper, get_mapper, available_mappers)
-from swiftmap.core.nfn import NextFlightPlanner
+from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner
 
 __all__ = [
     "MappingSession",
