@@ -21,6 +21,8 @@ scene's bounding-box diagonal, so the planner works regardless of the scene's sc
 """
 
 import numpy as np
+
+from swiftmap.core.primitives.types import Reconstruction
 from typing import Dict, Optional
 
 
@@ -56,8 +58,9 @@ class NextFlightPlanner:
         self.max_viewpoints = max_viewpoints
 
     def plan(self, predictions: Dict) -> Dict:
-        wp = np.asarray(predictions["world_points"]).reshape(-1, 3)
-        conf = np.asarray(predictions["world_points_conf"]).reshape(-1)
+        recon = Reconstruction.wrap(predictions)
+        wp = recon.world_points.reshape(-1, 3)
+        conf = recon.world_points_conf.reshape(-1)
         valid = np.isfinite(wp).all(1) & np.isfinite(conf)
         wp, conf = wp[valid], conf[valid]
         if len(wp) == 0:
@@ -88,7 +91,7 @@ class NextFlightPlanner:
         _, eigvecs = np.linalg.eigh(np.cov((wp - scene_centroid).T))
         up = eigvecs[:, 0]
         basis_v, basis_u = eigvecs[:, 1], eigvecs[:, 2]
-        cams = self._camera_positions(predictions)
+        cams = self._camera_positions(recon)
         if cams is not None and len(cams) and np.dot(up, cams.mean(0) - scene_centroid) < 0:
             up = -up
 

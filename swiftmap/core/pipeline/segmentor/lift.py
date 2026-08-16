@@ -21,8 +21,7 @@ import numpy as np
 import trimesh
 
 from swiftmap.core import constants
-from swiftmap.core.mapper.scene_export import (
-    apply_scene_alignment, _flatten_colors, _CONF_EPSILON)
+from swiftmap.core.primitives import geometry
 
 RED = np.array([255, 0, 0], dtype=np.uint8)
 # Cap on segmented points fed to clustering (subsampled if exceeded) to bound cost.
@@ -40,22 +39,12 @@ def frame_images(predictions: Dict[str, Any]) -> List[np.ndarray]:
 
 
 def _confidence_keep(predictions: Dict[str, Any], conf_thres: Optional[float]) -> np.ndarray:
-    """Per-pixel keep mask (S, H, W) from the confidence percentile cut.
-
-    Matches the reconstruction viewer's filter (scene_export._confidence_mask):
-    keep points whose confidence is >= the ``conf_thres``-th percentile (over all
-    points) and strictly positive. ``conf_thres`` of 0 or None keeps everything
-    (bar non-positive confidence). Returns all-True if there is no confidence.
-    """
-    wp = np.asarray(predictions["world_points"])
+    """Per-pixel (S,H,W) confidence keep-mask (percentile cut via geometry)."""
     conf = predictions.get("world_points_conf")
     if conf is None:
-        return np.ones(wp.shape[:-1], dtype=bool)
+        return np.ones(np.asarray(predictions["world_points"]).shape[:-1], dtype=bool)
     conf = np.asarray(conf)
-    if not conf_thres:                                  # 0 / None -> only drop <=0
-        return conf > _CONF_EPSILON
-    thr = np.percentile(conf, conf_thres)
-    return (conf >= thr) & (conf > _CONF_EPSILON)
+    return geometry.confidence_mask(conf, conf_thres).reshape(conf.shape)
 
 
 def masks_to_points(predictions: Dict[str, Any], masks: np.ndarray,
@@ -71,7 +60,7 @@ def masks_to_points(predictions: Dict[str, Any], masks: np.ndarray,
              & np.isfinite(wp).all(-1)
              & _confidence_keep(predictions, conf_thres))
     pts = wp[valid]
-    colors = _flatten_colors(predictions["images"]).reshape(wp.shape[:-1] + (3,))
+    colors = geometry.flatten_colors(predictions["images"]).reshape(wp.shape[:-1] + (3,))
     cols = colors[valid]
     return pts, cols
 
@@ -97,7 +86,7 @@ def export_highlight_glb(predictions: Dict[str, Any], masks: np.ndarray,
     """
     wp = np.asarray(predictions["world_points"])
     flat_pts = wp.reshape(-1, 3)
-    flat_cols = _flatten_colors(predictions["images"])   # (N, 3) uint8
+    flat_cols = geometry.flatten_colors(predictions["images"])   # (N, 3) uint8
     seg = masks.astype(bool).reshape(-1)
     keep = np.isfinite(flat_pts).all(-1) & _confidence_keep(predictions, conf_thres).reshape(-1)
 
@@ -114,10 +103,10 @@ def export_highlight_glb(predictions: Dict[str, Any], masks: np.ndarray,
     cols[len(bg_idx):] = RED                             # segmented points -> red
 
     scene = trimesh.Scene()
-    scene.add_geometry(trimesh.PointCloud(vertices=pts, colors=cols))
+    scene.add_geometry(geometry.pointcloud(pts, cols))
     ext = _extrinsics_4x4(predictions)
     if ext is not None:
-        scene = apply_scene_alignment(scene, ext)
+        scene = geometry.apply_scene_alignment(scene, ext)
 
     safe = "".join(c if c.isalnum() else "_" for c in query.strip()) or "query"
     path = os.path.join(target_dir, f"segmented_{safe}.glb")
