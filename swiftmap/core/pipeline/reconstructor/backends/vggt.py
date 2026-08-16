@@ -15,9 +15,9 @@ import numpy as np
 import torch
 
 from swiftmap.core import constants
-from swiftmap.core.mapper.base import BaseMapper
-from swiftmap.core.mapper.geometry import camera_poses_from_extrinsics
-from swiftmap.core.mapper.registry import register_mapper
+from swiftmap.core.pipeline.reconstructor.base import BaseMapper
+from swiftmap.core.pipeline.reconstructor.postprocess import camera_poses_from_extrinsics
+from swiftmap.core.pipeline.reconstructor.registry import register_mapper
 
 
 @register_mapper(

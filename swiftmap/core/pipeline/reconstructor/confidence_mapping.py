@@ -15,6 +15,8 @@ import torch
 from typing import Dict, Optional, Tuple, Union
 import warnings
 
+from swiftmap.core.primitives import geometry
+
 # Suppress matplotlib warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
 
@@ -89,19 +91,13 @@ def generate_confidence_point_cloud(
     # Apply confidence threshold using percentile-based filtering (same as main 3D scene)
     # conf_threshold is expected to be a decimal (0.0-1.0) representing percentile
     # e.g., 0.6 means keep top 40% of points (filter bottom 60%)
-    if conf_threshold == 0.0:
-        actual_threshold = 0.0
-    else:
-        # Convert decimal to percentile (0.6 -> 60th percentile)
-        percentile = conf_threshold * 100
-        actual_threshold = np.percentile(confidence, percentile)
-    
-    high_conf_mask = confidence >= actual_threshold
+    # conf_threshold is a decimal (0-1); geometry.confidence_mask takes a percentile.
+    high_conf_mask = geometry.confidence_mask(confidence, conf_threshold * 100)
     filtered_points = world_points[high_conf_mask]
     filtered_conf = confidence[high_conf_mask]
     
     print(f"Points after confidence filtering: {len(filtered_points)}/{len(world_points)} "
-          f"(percentile: {conf_threshold*100:.1f}%, threshold: {actual_threshold:.4f})")
+          f"(percentile: {conf_threshold*100:.1f}%)")
     
     # Subsample for performance if needed
     if max_points is not None and len(filtered_points) > max_points:
@@ -111,7 +107,7 @@ def generate_confidence_point_cloud(
         print(f"Subsampled to {max_points} points for visualization")
     
     if len(filtered_points) == 0:
-        print(f"Warning: No points above percentile threshold {conf_threshold*100:.1f}% (actual threshold: {actual_threshold:.4f})")
+        print(f"Warning: No points above percentile threshold {conf_threshold*100:.1f}% ")
         empty_scene = trimesh.Scene()
         stats = {
             "total_points": len(world_points),
@@ -431,38 +427,16 @@ def save_confidence_point_cloud_ply(
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         ply_filename = os.path.join(output_dir, f"{filename_prefix}_{timestamp}.ply")
 
-    # Write PLY file with custom format
-    num_points = len(points)
-    
-    with open(ply_filename, 'w') as f:
-        # PLY header
-        f.write("ply\n")
-        f.write("format ascii 1.0\n")
-        f.write(f"comment NFN Confidence Map - {datetime.now().isoformat()}\n")
-        f.write(f"comment Total Points: {stats['total_points']}\n")
-        f.write(f"comment High Confidence Points: {stats['high_conf_points']}\n")
-        f.write(f"comment Coverage Ratio: {stats['coverage_ratio']:.3f}\n")
-        f.write(f"comment Mean Confidence: {stats['mean_confidence']:.4f}\n")
-        f.write(f"comment Filtered Mean Confidence: {stats['filtered_mean_confidence']:.4f}\n")
-        f.write(f"element vertex {num_points}\n")
-        f.write("property float x\n")
-        f.write("property float y\n")
-        f.write("property float z\n")
-        f.write("property uchar red\n")
-        f.write("property uchar green\n")
-        f.write("property uchar blue\n")
-        f.write("property uchar alpha\n")
-        f.write("property float confidence\n")  # Absolute confidence value
-        f.write("end_header\n")
-        
-        # Write point data
-        for i in range(num_points):
-            x, y, z = points[i]
-            r, g, b, a = colors[i]
-            conf = confidence_values[i]
-            f.write(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b} {a} {conf:.6f}\n")
-    
+    comments = [
+        f"NFN Confidence Map - {datetime.now().isoformat()}",
+        f"Total Points: {stats['total_points']}",
+        f"High Confidence Points: {stats['high_conf_points']}",
+        f"Coverage Ratio: {stats['coverage_ratio']:.3f}",
+        f"Mean Confidence: {stats['mean_confidence']:.4f}",
+        f"Filtered Mean Confidence: {stats['filtered_mean_confidence']:.4f}",
+    ]
+    geometry.write_ply(ply_filename, points, colors, confidence=confidence_values, comments=comments)
+
     print(f"[NFN] Saved confidence PLY file: {ply_filename}")
-    print(f"[NFN] Points: {num_points}, Mean confidence: {stats['filtered_mean_confidence']:.4f}")
-    
+    print(f"[NFN] Points: {len(points)}, Mean confidence: {stats['filtered_mean_confidence']:.4f}")
     return ply_filename

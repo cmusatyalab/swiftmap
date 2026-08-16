@@ -8,7 +8,7 @@ Wraps VGGT-Omega behind ``BaseMapper``. Unlike VGGT, Omega:
   * preprocesses at a configurable ``image_resolution`` (patch size 16);
   * decodes pose with ``encoding_to_camera`` (not ``pose_encoding_to_extri_intri``);
   * predicts depth only (no point head), so world points are recovered by
-    unprojecting depth (``geometry.unproject_depth_map_to_point_map``) into
+    unprojecting depth (``_unproject_depth_map_to_point_map``, below) into
     ``world_points_from_depth``.
 
 The ``vggt_omega`` package (import name ``vggt_omega``, distinct from ``vggt``)
@@ -22,10 +22,36 @@ import numpy as np
 import torch
 
 from swiftmap.core import constants
-from swiftmap.core.mapper.base import BaseMapper
-from swiftmap.core.mapper.geometry import (
-    camera_poses_from_extrinsics, unproject_depth_map_to_point_map)
-from swiftmap.core.mapper.registry import register_mapper
+from swiftmap.core.pipeline.reconstructor.base import BaseMapper
+from swiftmap.core.pipeline.reconstructor.postprocess import camera_poses_from_extrinsics
+from swiftmap.core.pipeline.reconstructor.registry import register_mapper
+
+
+def _unproject_depth_map_to_point_map(depth_map: np.ndarray,
+                                      extrinsic: np.ndarray,
+                                      intrinsic: np.ndarray) -> np.ndarray:
+    """Unproject per-frame depth maps into world-space 3D points.
+
+    depth_map (S,H,W,1)|(S,H,W); extrinsic (S,3,4) world-to-camera [R|t]; intrinsic
+    (S,3,3). Returns (S,H,W,3) world points (the ``world_points_from_depth`` layout).
+    """
+    depth = depth_map[..., 0] if depth_map.ndim == 4 else depth_map
+    num_frames, height, width = depth.shape
+
+    y, x = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+    x = np.broadcast_to(x[None], (num_frames, height, width))
+    y = np.broadcast_to(y[None], (num_frames, height, width))
+
+    fx = intrinsic[:, 0, 0][:, None, None]
+    fy = intrinsic[:, 1, 1][:, None, None]
+    cx = intrinsic[:, 0, 2][:, None, None]
+    cy = intrinsic[:, 1, 2][:, None, None]
+
+    camera_points = np.stack([(x - cx) / fx * depth, (y - cy) / fy * depth, depth], axis=-1)
+    rotation = extrinsic[:, :3, :3]
+    translation = extrinsic[:, :3, 3]
+    return np.einsum("sij,shwj->shwi", np.transpose(rotation, (0, 2, 1)),
+                     camera_points - translation[:, None, None, :])
 
 
 @register_mapper(
@@ -101,7 +127,7 @@ class VGGTOmegaMapper(BaseMapper):
         # them under the standard keys so the exporter, confidence map, and NFN
         # planner all work uniformly (same schema as VGGT's point head). Keep the
         # explicit *_from_depth alias too for clarity/provenance.
-        world_points = unproject_depth_map_to_point_map(
+        world_points = _unproject_depth_map_to_point_map(
             processed["depth"], processed["extrinsic"], processed["intrinsic"])
         processed["world_points_from_depth"] = world_points
         processed["world_points"] = world_points

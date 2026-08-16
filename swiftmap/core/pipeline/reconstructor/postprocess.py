@@ -27,16 +27,27 @@ from typing import Any, Dict
 import numpy as np
 import torch
 
-from swiftmap.core.mapper.scene_export import (
+from swiftmap.core.pipeline.reconstructor.scene_export import (
     predictions_to_glb, export_point_cloud_to_ply, save_point_cloud_ply)
 
 try:
-    from swiftmap.core.mapper.confidence_mapping import (
+    from swiftmap.core.pipeline.reconstructor.confidence_mapping import (
         generate_confidence_point_cloud, analyze_confidence_distribution)
     CONFIDENCE_MAPPING_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional viz deps
     CONFIDENCE_MAPPING_AVAILABLE = False
     print("Warning: Confidence mapping utilities not available")
+
+
+def camera_poses_from_extrinsics(extrinsic: np.ndarray):
+    """(positions, rotations) in world coords from (S,3,4) extrinsics: ``-R^T t``, ``R^T``."""
+    positions, rotations = [], []
+    for ext in extrinsic:
+        R = ext[:3, :3]
+        t = ext[:3, 3]
+        positions.append(-R.T @ t)
+        rotations.append(R.T)
+    return np.array(positions), np.array(rotations)
 
 
 def ensure_cpu_tensors(data: Dict[str, Any]) -> Dict[str, Any]:

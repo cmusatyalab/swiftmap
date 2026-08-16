@@ -10,12 +10,12 @@ Public API:
 Importing this package also imports the backend adapters, which registers them.
 ``VGGTMapper`` is re-exported for backward compatibility.
 """
-from swiftmap.core.mapper.base import BaseMapper
-from swiftmap.core.mapper.registry import (
+from swiftmap.core.pipeline.reconstructor.base import BaseMapper
+from swiftmap.core.pipeline.reconstructor.registry import (
     register_mapper, get_mapper, available_mappers, is_registered)
 
 # Importing the backends registers them in the registry.
-from swiftmap.core.mapper.backends import VGGTMapper, VGGTOmegaMapper
+from swiftmap.core.pipeline.reconstructor.backends import VGGTMapper, VGGTOmegaMapper
 
 __all__ = [
     "BaseMapper",
