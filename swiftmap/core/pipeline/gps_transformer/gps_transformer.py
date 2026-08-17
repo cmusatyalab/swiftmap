@@ -2,8 +2,8 @@
 """Align a local (unitless) reconstruction to GPS.
 
 ``GpsTransformer`` fits a similarity transform (Umeyama + ICP) from the camera
-trajectory to a GPS trace and builds the ``Georeference`` (a type in
-``swiftmap.core.primitives.types``) that applies it."""
+trajectory to a GPS trace and builds the ``Georeference`` (in
+``swiftmap.core.database``) that applies it."""
 
 import numpy as np
 from typing import Any, Dict, Tuple
@@ -57,7 +57,7 @@ class GpsTransformer:
     def from_calibration(self, slam_xyz: np.ndarray, gps_lla: np.ndarray,
                          use_icp: bool = True) -> Tuple[Any, Dict[str, Any]]:
         """Fit and return (Georeference, cfg)."""
-        from swiftmap.core.primitives.types import Georeference
+        from swiftmap.core.database.georeference import Georeference
         cfg = self.calibrate(slam_xyz, gps_lla, use_icp=use_icp)
         return Georeference(cfg), cfg
 

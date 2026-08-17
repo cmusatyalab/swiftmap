@@ -1,66 +1,13 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""Shared point-cloud primitives (pure numpy/trimesh): color flattening, confidence
-masks, trimesh point clouds and scenes, and PLY writing. A leaf that ``types``, ``map`` and the pipeline build on; single-consumer
-geometry lives with its consumer instead."""
+"""Drawing helpers (pure numpy/trimesh): trimesh point clouds and scenes, camera
+frustums, and PLY writing. Used only by the pipeline."""
 
 import numpy as np
 
 _CONF_EPSILON = 1e-6
 
 
-def flatten_colors(images: np.ndarray) -> np.ndarray:
-    """(S,3,H,W) or (S,H,W,3) float[0,1] images -> (N,3) uint8 RGB."""
-    images = np.asarray(images)
-    if images.ndim == 4 and images.shape[1] == 3:
-        images = np.transpose(images, (0, 2, 3, 1))
-    return (images.reshape(-1, 3) * 255).astype(np.uint8)
-
-
-def confidence_mask(conf, percentile) -> np.ndarray:
-    """Boolean keep-mask over a flat confidence array: ``conf >= P``-th percentile
-    and strictly positive. ``percentile`` in [0, 100]; 0/None keeps all positive."""
-    conf = np.asarray(conf, dtype=float).reshape(-1)
-    if not percentile:
-        return conf > _CONF_EPSILON
-    thr = np.percentile(conf, float(percentile))
-    return (conf >= thr) & (conf > _CONF_EPSILON)
-
-
-def voxel_merge(points, colors, conf, voxel_size: float):
-    """Collapse points sharing a ``voxel_size`` grid cell into one, confidence-weighted.
-
-    Position and color become the confidence-weighted mean of the cell; the merged
-    confidence is the cell's max. ``voxel_size <= 0`` returns the input unchanged.
-    """
-    points = np.asarray(points, dtype=float)
-    if voxel_size <= 0 or len(points) == 0:
-        return points, np.asarray(colors), np.asarray(conf, dtype=float)
-
-    w = np.asarray(conf, dtype=float)
-    vidx = np.floor(points / voxel_size).astype(np.int64)
-    vidx -= vidx.min(axis=0)
-    dims = vidx.max(axis=0) + 1
-    if dims.prod() >= np.iinfo(np.int64).max:
-        raise OverflowError("voxel grid too large for a linear key; raise the voxel size")
-    key = (vidx[:, 0] * dims[1] + vidx[:, 1]) * dims[2] + vidx[:, 2]
-    _, inv = np.unique(key, return_inverse=True)
-
-    g = inv.max() + 1
-    wsum = np.bincount(inv, weights=w, minlength=g)
-    wsafe = np.where(wsum > 0, wsum, 1.0)
-    pos = np.empty((g, 3))
-    col = np.empty((g, 3))
-    cols_f = np.asarray(colors, dtype=float)
-    for k in range(3):
-        pos[:, k] = np.bincount(inv, weights=w * points[:, k], minlength=g) / wsafe
-        col[:, k] = np.bincount(inv, weights=w * cols_f[:, k], minlength=g) / wsafe
-    mconf = np.zeros(g)
-    np.maximum.at(mconf, inv, w)
-    return pos, np.clip(col, 0, 255).astype(np.uint8), mconf
-
-
-# ---------------------------------------------------------------------- meshing
 def pointcloud(points, colors):
     """trimesh PointCloud from (N,3) points + (N,3) uint8 RGB (alpha filled)."""
     import trimesh

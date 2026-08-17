@@ -8,7 +8,8 @@ import numpy as np
 
 from swiftmap.core.database.map import Map
 from swiftmap.core.pipeline.renderer.confidence import generate_confidence_point_cloud
-from swiftmap.core.primitives import geometry
+from swiftmap.core.pipeline.utils import geometry
+from swiftmap.core.database import cloud as arrays
 
 
 def render(m: Map, conf_level: float) -> dict:
@@ -27,9 +28,9 @@ def _view_path(m: Map, kind: str, conf_level) -> str:
 def _render_scene(m: Map, conf_level):
     """Point cloud + camera frustums in world coords -- same path for raw and merged."""
     try:
-        data = m.load(conf_thres=0.0)
-        keep = geometry.confidence_mask(data.conf, conf_level)
-        scene = geometry.pointcloud_scene(data.points[keep], data.colors[keep], data.frames)
+        pts, cols, conf, _, frames = m.load(conf_thres=0.0)
+        keep = arrays.confidence_mask(conf, conf_level)
+        scene = geometry.pointcloud_scene(pts[keep], cols[keep], frames)
         path = _view_path(m, "reconstruction", conf_level)
         scene.export(path)
         return path

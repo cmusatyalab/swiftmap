@@ -15,7 +15,8 @@ import torch
 from typing import Dict, Optional, Tuple, Union
 import warnings
 
-from swiftmap.core.primitives import geometry
+from swiftmap.core.pipeline.utils import geometry
+from swiftmap.core.database import cloud as arrays
 
 # Suppress matplotlib warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
@@ -90,7 +91,7 @@ def generate_confidence_point_cloud(
     # conf_threshold is expected to be a decimal (0.0-1.0) representing percentile
     # e.g., 0.6 means keep top 40% of points (filter bottom 60%)
     # conf_threshold is a decimal (0-1); geometry.confidence_mask takes a percentile.
-    high_conf_mask = geometry.confidence_mask(confidence, conf_threshold * 100)
+    high_conf_mask = arrays.confidence_mask(confidence, conf_threshold * 100)
     filtered_points = world_points[high_conf_mask]
     filtered_conf = confidence[high_conf_mask]
     

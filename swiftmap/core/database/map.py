@@ -4,7 +4,7 @@
 
 Holds a raw ``predictions.npz`` (a reconstructed batch) or a merged ``merged_points.npz``
 plus transform/camera/map json. It is the store record -- identity, metadata, ``load``
-(-> MapData) and ``write`` (MapData -> dir); previews and segmentation come from the pipeline."""
+(-> arrays) and ``write`` (arrays -> dir); previews and segmentation come from the pipeline."""
 
 import glob
 import json
@@ -16,7 +16,8 @@ from typing import List, Optional
 
 import numpy as np
 
-from swiftmap.core.primitives.types import Georeference, MapData, Reconstruction
+from swiftmap.core.database import cloud
+from swiftmap.core.database.georeference import Georeference
 
 # write() imports confidence_mapping on demand: it is a heavy dep needed only there.
 
@@ -177,10 +178,10 @@ class Map:
         return {k: npz[k] for k in npz.files if k != "metadata"}
 
     # ---------------------------------------------------------------- geometry
-    def load(self, conf_thres: float = 50.0) -> MapData:
-        """Load this map's geometry into a MapData (merged flat, or raw predictions).
+    def load(self, conf_thres: float = 50.0):
+        """This map's cloud as ``(points, colors, conf, transform, frames)``.
 
-        A merged map's cloud is already confidence-filtered and loaded verbatim; a raw
+        A merged map's cloud is loaded verbatim (already filtered); a raw
         ``predictions.npz`` gets the ``conf_thres`` percentile cut.
         """
         gt = self.transform or Georeference(
@@ -191,26 +192,33 @@ class Map:
         flat = os.path.join(self.path, "merged_points.npz")
         if os.path.isfile(flat):
             z = np.load(flat)
-            return MapData(z["points"], z["colors"], z["conf"], gt, frames)
+            return z["points"], z["colors"], z["conf"], gt, frames
 
-        npz = np.load(os.path.join(self.path, "predictions.npz"), allow_pickle=True)
-        recon = Reconstruction({k: npz[k] for k in npz.files if k != "metadata"})
-        return recon.to_mapdata(gt, frames=frames, conf_percentile=conf_thres)
+        preds = self.predictions
+        pts = np.asarray(preds["world_points"]).reshape(-1, 3)
+        cols = cloud.flatten_colors(preds["images"])
+        keep = np.isfinite(pts).all(1)
+        conf = (np.asarray(preds["world_points_conf"]).reshape(-1)
+                if "world_points_conf" in preds else np.ones(len(pts)))
+        if conf_thres:
+            keep &= cloud.confidence_mask(conf, conf_thres)
+        return pts[keep], cols[keep], conf[keep], gt, frames
 
     # ------------------------------------------------------------- persistence
-    def write(self, mapdata: MapData, source_maps=(), site: str = None,
-              created: datetime = None) -> "Map":
-        """Persist ``mapdata`` into this dir: cloud, transform, poses, map.json.
+    def write(self, points, colors, conf, transform: Georeference, frames=(),
+              source_maps=(), site: str = None, created: datetime = None) -> "Map":
+        """Persist a cloud into this dir: cloud, transform, poses, map.json.
 
         Data only -- previews come from ``pipeline.renderer.write_previews``."""
         created = created or datetime.now()
         site = site or self.metadata.site or "map"
         os.makedirs(self.path, exist_ok=True)
 
-        pts = np.asarray(mapdata.points)
-        cols = np.asarray(mapdata.colors, np.uint8)
-        conf = np.asarray(mapdata.conf, dtype=float)
-        frames, o = mapdata.frames, mapdata.origin
+        pts = np.asarray(points)
+        cols = np.asarray(colors, np.uint8)
+        conf = np.asarray(conf, dtype=float)
+        frames = list(frames)
+        o = (transform.lat0, transform.lon0, transform.alt0)
         sources = list(source_maps)
 
         np.savez(os.path.join(self.path, "merged_points.npz"), points=pts, colors=cols, conf=conf)

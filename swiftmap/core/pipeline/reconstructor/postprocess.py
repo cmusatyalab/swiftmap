@@ -28,8 +28,10 @@ import numpy as np
 import torch
 
 from swiftmap.core.pipeline.reconstructor import sky_mask
-from swiftmap.core.primitives import geometry
-from swiftmap.core.primitives.types import Georeference, Reconstruction
+from swiftmap.core.database import cloud
+from swiftmap.core.pipeline.utils import geometry
+from swiftmap.core.database import cloud as arrays
+from swiftmap.core.database.georeference import Georeference
 
 try:
     from swiftmap.core.pipeline.renderer.confidence import generate_confidence_point_cloud
@@ -196,7 +198,6 @@ _LOCAL_FRAME = {"scale": 1.0, "rotation": np.eye(3).tolist(), "translation": [0.
 
 def preview_scene(predictions, params, target_dir):
     """The run's preview GLB: confidence-filtered cloud + camera frustums, in local coords."""
-    recon = Reconstruction.wrap(predictions)
     pts, conf = _point_conf_keys(predictions)
     if params.get("mask_sky"):
         conf = sky_mask.apply_sky_mask(np.array(conf, dtype=float), target_dir)
@@ -207,7 +208,8 @@ def preview_scene(predictions, params, target_dir):
         positions, rotations = camera_poses_from_extrinsics(predictions["extrinsic"])
         frames = [{"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()}
                   for p, R in zip(positions, rotations)]
-    data = Reconstruction.wrap(preds).to_mapdata(
-        Georeference(_LOCAL_FRAME), frames=frames,
-        conf_percentile=params["conf_threshold"])
-    return geometry.pointcloud_scene(data.points, data.colors, data.frames)
+    xyz = np.asarray(pts).reshape(-1, 3)
+    cols = arrays.flatten_colors(preds["images"])
+    keep = np.isfinite(xyz).all(1) & arrays.confidence_mask(np.asarray(conf).reshape(-1),
+                                                           params["conf_threshold"])
+    return geometry.pointcloud_scene(xyz[keep], cols[keep], frames)

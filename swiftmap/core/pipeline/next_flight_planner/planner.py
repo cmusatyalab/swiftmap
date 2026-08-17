@@ -25,8 +25,7 @@ import os
 
 import numpy as np
 
-from swiftmap.core.primitives import kml
-from swiftmap.core.primitives.types import Reconstruction
+from swiftmap.core.pipeline.utils import kml
 from typing import Dict, Optional
 
 
@@ -62,9 +61,8 @@ class NextFlightPlanner:
         self.max_viewpoints = max_viewpoints
 
     def plan(self, predictions: Dict) -> Dict:
-        recon = Reconstruction.wrap(predictions)
-        wp = recon.world_points.reshape(-1, 3)
-        conf = recon.world_points_conf.reshape(-1)
+        wp = np.asarray(predictions["world_points"]).reshape(-1, 3)
+        conf = np.asarray(predictions["world_points_conf"]).reshape(-1)
         valid = np.isfinite(wp).all(1) & np.isfinite(conf)
         wp, conf = wp[valid], conf[valid]
         if len(wp) == 0:
@@ -95,7 +93,7 @@ class NextFlightPlanner:
         _, eigvecs = np.linalg.eigh(np.cov((wp - scene_centroid).T))
         up = eigvecs[:, 0]
         basis_v, basis_u = eigvecs[:, 1], eigvecs[:, 2]
-        cams = self._camera_positions(recon)
+        cams = self._camera_positions(predictions)
         if cams is not None and len(cams) and np.dot(up, cams.mean(0) - scene_centroid) < 0:
             up = -up
 
@@ -213,9 +211,12 @@ def write_plan(plan, gps_transform, target_dir, segmented=None, seg_query=None) 
     if segmented:
         out["segmented_objects"] = {"query": seg_query, "num_objects": len(segmented),
                                     "objects": segmented}
-    path = _dump(target_dir, "next_flight_viewpoints.json", out)
+    path = os.path.join(target_dir, "next_flight_viewpoints.json")
+    with open(path, "w") as f:
+        json.dump(out, f, indent=2)
     if gps_transform is not None:
-        _dump(target_dir, "transform.json", gps_transform.cfg)
+        with open(os.path.join(target_dir, "transform.json"), "w") as f:
+            json.dump(gps_transform.cfg, f, indent=2)
         kml.write_kml(viewpoints, os.path.join(target_dir, "next_flight_viewpoints.kml"),
                       gps_key="target_gps", doc_name="nfn_pts")
         kml.write_polygon_kml(viewpoints, os.path.join(target_dir, "next_flight_area.kml"),

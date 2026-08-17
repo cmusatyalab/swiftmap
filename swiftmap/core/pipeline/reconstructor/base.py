@@ -20,7 +20,6 @@ import os
 import time
 from abc import ABC, abstractmethod
 
-from swiftmap.core.primitives.types import Reconstruction
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -133,7 +132,7 @@ class BaseMapper(ABC):
 
             total_processing_time = time.time() - processing_start
 
-            self.latest_predictions = Reconstruction(processed)
+            self.latest_predictions = processed
             self.latest_scene = scene_results.get("scene")
             self.latest_confidence_scene = confidence_results.get("scene")
             self.latest_scene_results = scene_results

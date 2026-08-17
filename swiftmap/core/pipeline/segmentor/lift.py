@@ -24,7 +24,8 @@ import trimesh
 
 from swiftmap.core import constants
 from swiftmap.core.database.map import Map
-from swiftmap.core.primitives import geometry, kml
+from swiftmap.core.pipeline.utils import geometry, kml
+from swiftmap.core.database import cloud as arrays
 
 RED = np.array([255, 0, 0], dtype=np.uint8)
 # Cap on segmented points fed to clustering (subsampled if exceeded) to bound cost.
@@ -47,7 +48,7 @@ def _confidence_keep(predictions: Dict[str, Any], conf_thres: Optional[float]) -
     if conf is None:
         return np.ones(np.asarray(predictions["world_points"]).shape[:-1], dtype=bool)
     conf = np.asarray(conf)
-    return geometry.confidence_mask(conf, conf_thres).reshape(conf.shape)
+    return arrays.confidence_mask(conf, conf_thres).reshape(conf.shape)
 
 
 def masks_to_points(predictions: Dict[str, Any], masks: np.ndarray,
@@ -63,7 +64,7 @@ def masks_to_points(predictions: Dict[str, Any], masks: np.ndarray,
              & np.isfinite(wp).all(-1)
              & _confidence_keep(predictions, conf_thres))
     pts = wp[valid]
-    colors = geometry.flatten_colors(predictions["images"]).reshape(wp.shape[:-1] + (3,))
+    colors = arrays.flatten_colors(predictions["images"]).reshape(wp.shape[:-1] + (3,))
     cols = colors[valid]
     return pts, cols
 
@@ -79,7 +80,7 @@ def export_highlight_glb(predictions: Dict[str, Any], masks: np.ndarray,
     """
     wp = np.asarray(predictions["world_points"])
     flat_pts = wp.reshape(-1, 3)
-    flat_cols = geometry.flatten_colors(predictions["images"])   # (N, 3) uint8
+    flat_cols = arrays.flatten_colors(predictions["images"])   # (N, 3) uint8
     seg = masks.astype(bool).reshape(-1)
     keep = np.isfinite(flat_pts).all(-1) & _confidence_keep(predictions, conf_thres).reshape(-1)
 
