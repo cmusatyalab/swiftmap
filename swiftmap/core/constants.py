@@ -14,6 +14,13 @@ import os
 DEFAULT_MIN_DISPARITY = 40.0
 # After selection, the keyframe set sent to VGGT is capped to this many (0 = no cap).
 DEFAULT_MAX_KEYFRAMES = 70
+# When more keyframes were selected than the cap, reconstruct() re-runs the
+# optical-flow selection over them with the disparity threshold multiplied by
+# this factor each round, until the batch fits the cap.
+KEYFRAME_REFINE_FACTOR = 1.25
+# Give up tightening after this many rounds and fall back to an even temporal
+# subsample (guards against non-convergence, e.g. repeated forced keyframes).
+KEYFRAME_REFINE_MAX_ROUNDS = 12
 
 # --- Reconstruction / confidence -------------------------------------------
 # Confidence threshold (percentile, %) used when filtering the point cloud.

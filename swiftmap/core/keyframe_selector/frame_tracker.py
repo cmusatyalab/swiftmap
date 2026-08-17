@@ -52,20 +52,21 @@ class FrameTracker:
         # Minimum number of good tracking points required
         self.min_tracking_points = 10
         
-    def initialize_keyframe(self, image: np.ndarray) -> bool:
+    def initialize_keyframe(self, image: np.ndarray, verbose: bool = True) -> bool:
         """
         Initialize a new keyframe with feature detection.
-        
+
         Args:
             image: Input image as numpy array (H, W, C) in BGR format
-            
+            verbose: Whether to print per-frame decisions
+
         Returns:
             bool: True if initialization successful, False otherwise
         """
         try:
             self.last_kf = image.copy()
             self.kf_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            
+
             # Detect good features to track
             self.kf_pts = cv2.goodFeaturesToTrack(
                 self.kf_gray,
@@ -74,39 +75,44 @@ class FrameTracker:
                 minDistance=self.min_distance,
                 blockSize=self.block_size
             )
-            
+
             if self.kf_pts is None or len(self.kf_pts) < self.min_tracking_points:
-                print(f"Warning: Only {len(self.kf_pts) if self.kf_pts is not None else 0} feature points detected")
+                if verbose:
+                    print(f"Warning: Only {len(self.kf_pts) if self.kf_pts is not None else 0} feature points detected")
                 return False
-                
-            print(f"Keyframe initialized with {len(self.kf_pts)} feature points")
+
+            if verbose:
+                print(f"Keyframe initialized with {len(self.kf_pts)} feature points")
             return True
             
         except Exception as e:
             print(f"Error initializing keyframe: {e}")
             return False
     
-    def compute_disparity(self, image: np.ndarray, min_disparity: float, visualize: bool = False) -> bool:
+    def compute_disparity(self, image: np.ndarray, min_disparity: float, visualize: bool = False,
+                          verbose: bool = True) -> bool:
         """
         Compute motion disparity and determine if image should be a keyframe.
-        
+
         Args:
             image: Current input image as numpy array (H, W, C) in BGR format
             min_disparity: Minimum mean disparity threshold for keyframe selection
             visualize: Whether to display optical flow visualization
-            
+            verbose: Whether to print per-frame decisions
+
         Returns:
             bool: True if image should be selected as keyframe, False otherwise
         """
         try:
             self.frame_count += 1
-            
+
             # First frame is always a keyframe
             if self.last_kf is None or self.kf_pts is None or len(self.kf_pts) < self.min_tracking_points:
-                success = self.initialize_keyframe(image)
+                success = self.initialize_keyframe(image, verbose=verbose)
                 if success:
                     self.last_disparity = float("inf")  # anchor frame: always keep
-                    print(f"Frame {self.frame_count}: First keyframe selected")
+                    if verbose:
+                        print(f"Frame {self.frame_count}: First keyframe selected")
                 return success
             
             # Convert current frame to grayscale
@@ -127,11 +133,13 @@ class FrameTracker:
             
             # Check if we have enough good tracking points
             if len(good_kf) < self.min_tracking_points:
-                print(f"Frame {self.frame_count}: Insufficient tracking points ({len(good_kf)}), reinitializing keyframe")
-                success = self.initialize_keyframe(image)
+                if verbose:
+                    print(f"Frame {self.frame_count}: Insufficient tracking points ({len(good_kf)}), reinitializing keyframe")
+                success = self.initialize_keyframe(image, verbose=verbose)
                 if success:
                     self.last_disparity = float("inf")  # forced keyframe: always keep
-                    print(f"Frame {self.frame_count}: Keyframe selected (reinitialization)")
+                    if verbose:
+                        print(f"Frame {self.frame_count}: Keyframe selected (reinitialization)")
                 return success
             
             # Compute displacement between keyframe and current frame
@@ -146,14 +154,16 @@ class FrameTracker:
             
             # Determine if disparity is large enough for new keyframe
             is_keyframe = mean_disparity > min_disparity
-            
+
             if is_keyframe:
-                print(f"Frame {self.frame_count}: Keyframe selected (disparity: {mean_disparity:.2f} > {min_disparity})")
+                if verbose:
+                    print(f"Frame {self.frame_count}: Keyframe selected (disparity: {mean_disparity:.2f} > {min_disparity})")
                 # Initialize new keyframe
-                success = self.initialize_keyframe(image)
+                success = self.initialize_keyframe(image, verbose=verbose)
                 return success
             else:
-                print(f"Frame {self.frame_count}: Skipped (disparity: {mean_disparity:.2f} <= {min_disparity})")
+                if verbose:
+                    print(f"Frame {self.frame_count}: Skipped (disparity: {mean_disparity:.2f} <= {min_disparity})")
                 return False
                 
         except Exception as e:

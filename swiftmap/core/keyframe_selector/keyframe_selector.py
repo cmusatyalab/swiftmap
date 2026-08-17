@@ -14,7 +14,7 @@ collection of selected keyframes.
 import time
 import cv2
 import numpy as np
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from swiftmap.core import constants
 from swiftmap.core.keyframe_selector.frame_tracker import FrameTracker
@@ -47,8 +47,8 @@ class KeyframeSelector:
             "processing_times": [],
         }
 
-        # Per-selected-keyframe priority value (the disparity that selected it), in
-        # selection order. Used by the session to cap the keyframe count by priority.
+        # Per-selected-keyframe score (the disparity that selected it), in selection
+        # order. Carried by the session into each keyframe's metadata.
         self.keyframe_values = []
 
         # Optical-flow overlay (BGR) of the last *selected* keyframe, so the preview
@@ -87,6 +87,53 @@ class KeyframeSelector:
             # Freeze the preview on the frame that was actually kept.
             self._keyframe_vis = self.frame_tracker.last_flow_vis
         return selected
+
+    def refine_to_cap(self, paths: List[str], cap: int) -> List[int]:
+        """Re-select among already-selected keyframes so at most ``cap`` remain.
+
+        Re-runs the sequential optical-flow selection over the saved keyframe
+        images, tightening the disparity threshold by a fixed factor each round
+        (starting from ``min_disparity``) and filtering the previous round's
+        survivors, until the batch fits the cap. If tightening does not converge
+        (e.g. tracking keeps failing between now-distant frames, forcing
+        keyframes), falls back to an even temporal subsample.
+
+        Live selection state (``frame_tracker``, stats) is untouched: each round
+        uses a throwaway tracker, so this is safe to call between captures.
+
+        Args:
+            paths: keyframe image paths, in capture order.
+            cap: maximum number of keyframes to keep (<= 0 means no cap).
+
+        Returns:
+            Sorted indices into ``paths`` of the keyframes to keep.
+        """
+        n = len(paths)
+        if cap <= 0 or n <= cap:
+            return list(range(n))
+
+        threshold = self.min_disparity if self.min_disparity > 0 else 1.0
+        survivors = list(range(n))
+        for _ in range(constants.KEYFRAME_REFINE_MAX_ROUNDS):
+            threshold *= constants.KEYFRAME_REFINE_FACTOR
+            tracker = FrameTracker()
+            kept = []
+            for idx in survivors:
+                image = cv2.imread(paths[idx])
+                if image is None:
+                    continue  # unreadable file: drop it
+                if tracker.compute_disparity(image, threshold, verbose=False):
+                    kept.append(idx)
+            survivors = kept or survivors
+            print(f"Keyframe refinement: threshold {threshold:.1f} px -> "
+                  f"{len(survivors)}/{n} keyframes")
+            if len(survivors) <= cap:
+                return survivors
+
+        print(f"Keyframe refinement did not converge; evenly subsampling "
+              f"{len(survivors)} -> {cap} keyframes")
+        picks = np.linspace(0, len(survivors) - 1, cap).round().astype(int)
+        return [survivors[i] for i in sorted(set(picks.tolist()))]
 
     @property
     def latest_flow_vis(self) -> Optional[np.ndarray]:

@@ -69,10 +69,12 @@ class MappingSession:
         # Latest NFN plan (set by plan(); used by export).
         self.latest_plan = None
 
-        # Live keyframe cap: at most this many keyframes are retained during
-        # collection. With keyframe selection, an incoming frame replaces the
-        # lowest-disparity one only if it scores higher; without selection the cap is a
-        # FIFO window (keep the newest). 0 disables the cap.
+        # Keyframe cap: at most this many keyframes are sent to reconstruction.
+        # With keyframe selection every selected frame is retained during
+        # collection; if more than the cap were collected, reconstruct() re-runs
+        # the selection over them with a progressively tightened disparity
+        # threshold until the batch fits. Without selection (keep_all) the cap
+        # bounds collection as a FIFO window (keep the newest). 0 disables the cap.
         self.max_keyframes = constants.DEFAULT_MAX_KEYFRAMES
 
         # Transport is created on start() (its port is chosen then).
@@ -88,7 +90,8 @@ class MappingSession:
         self._stream_gps_rows = 0
         self._gps_csv_lock = threading.Lock()
 
-        # Bounded priority buffer of retained keyframes. Each entry:
+        # Buffer of retained keyframes (bounded as a FIFO window only under
+        # keep_all; unbounded during collection with keyframe selection). Each entry:
         #   {"seq": capture index, "score": disparity, "path": jpeg, "gps": (lat,lon,alt)|None}
         # Kept unordered; read back sorted by "seq" (capture order). Guarded by the lock.
         self._buffer: List[Dict[str, Any]] = []
@@ -169,12 +172,12 @@ class MappingSession:
         print("Mapping session stopped")
 
     def _on_frame(self, image, metadata: Dict[str, Any]) -> bool:
-        """TCP-server callback: run selection and tag the frame with its priority
-        score. The saved keyframe is folded into the bounded buffer on the next drain.
+        """TCP-server callback: run selection and tag the frame with its disparity
+        score. The saved keyframe is folded into the buffer on the next drain.
         """
         is_keyframe = self.selector.is_keyframe(image)
         if is_keyframe:
-            # Priority recorded by the selector: disparity, +inf for anchor/forced
+            # Score recorded by the selector: disparity, +inf for anchor/forced
             # keyframes, 0.0 for keep-all. Carried in metadata to the drain step.
             metadata["score"] = float(self.selector.keyframe_values[-1])
         return is_keyframe
@@ -222,8 +225,8 @@ class MappingSession:
 
     # -------------------------------------------------------- bounded keyframe buffer
     def _drain(self):
-        """Fold newly-saved keyframes from the server queue into the bounded priority
-        buffer (evicting the weakest when over the cap) and keep the GPS CSV in sync."""
+        """Fold newly-saved keyframes from the server queue into the buffer (a FIFO
+        window under keep_all) and keep the GPS CSV in sync."""
         if not self.tcp_server:
             return
         changed = False
@@ -245,41 +248,34 @@ class MappingSession:
         if snapshot is not None:
             self._write_gps_csv(snapshot)
 
-    def _priority_key(self):
-        """What "best" means when the buffer is full: disparity score under keyframe
-        selection, or recency (seq) without it (FIFO window)."""
-        return "seq" if self.selector.keep_all else "score"
-
     def _insert_entry(self, entry) -> bool:
         """Fold one selected keyframe into the buffer. Returns whether the buffer
         changed. Caller holds the lock.
 
-        Without keyframe selection there is no score, so the cap is a FIFO window:
-        every new frame is kept and the oldest is dropped. With selection, keep the
-        top-``cap`` by disparity, replacing the weakest only if the new frame beats it.
+        With keyframe selection every selected frame is kept — the cap is enforced
+        at reconstruct() by re-running the selection with a tighter threshold.
+        Without selection (keep_all) the cap is a FIFO window: every new frame is
+        kept and the oldest is dropped.
         """
         cap = self.max_keyframes
-        if not cap or len(self._buffer) < cap:
+        if not (cap and self.selector.keep_all) or len(self._buffer) < cap:
             self._buffer.append(entry)
             return True
 
-        key = self._priority_key()
-        weakest = min(range(len(self._buffer)), key=lambda i: self._buffer[i][key])
-        if entry[key] > self._buffer[weakest][key]:  # newest seq always wins under FIFO
-            self._remove_file(self._buffer[weakest]["path"])
-            self._buffer[weakest] = entry
-            return True
-        self._remove_file(entry["path"])  # not good enough to keep
-        return False
+        oldest = min(range(len(self._buffer)), key=lambda i: self._buffer[i]["seq"])
+        self._remove_file(self._buffer[oldest]["path"])
+        self._buffer[oldest] = entry
+        return True
 
     def _trim_to_cap(self) -> bool:
-        """Drop the lowest-priority keyframes if the buffer exceeds the cap (e.g. the
-        cap was lowered): weakest score with selection, oldest (FIFO) without. Returns
-        whether anything was removed. Caller holds the lock."""
+        """Drop the oldest keyframes if the FIFO window (keep_all) exceeds the cap
+        (e.g. the cap was lowered mid-capture). With keyframe selection the buffer is
+        left intact — the cap is applied at reconstruct(). Returns whether anything
+        was removed. Caller holds the lock."""
         cap = self.max_keyframes
-        if not cap or len(self._buffer) <= cap:
+        if not cap or not self.selector.keep_all or len(self._buffer) <= cap:
             return False
-        self._buffer.sort(key=lambda e: e[self._priority_key()], reverse=True)
+        self._buffer.sort(key=lambda e: e["seq"], reverse=True)
         for e in self._buffer[cap:]:
             self._remove_file(e["path"])
         del self._buffer[cap:]
@@ -292,7 +288,8 @@ class MappingSession:
             return [e["path"] for e in sorted(self._buffer, key=lambda e: e["seq"])]
 
     def get_keyframe_count(self) -> int:
-        """Number of keyframes currently retained (<= the cap)."""
+        """Number of keyframes currently retained (with keyframe selection this may
+        exceed the cap — the cap is applied at reconstruct())."""
         self._drain()
         with self._paths_lock:
             return len(self._buffer)
@@ -350,19 +347,33 @@ class MappingSession:
         return {"segmenter": name, "changed": True}
 
     def reconstruct(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Run reconstruction on the retained keyframes (already <= the cap)."""
+        """Run reconstruction on the retained keyframes.
+
+        If keyframe selection collected more frames than the cap, the selection is
+        first re-run over them with a progressively tightened disparity threshold
+        until the batch fits (see ``KeyframeSelector.refine_to_cap``); at or under
+        the cap, the collected keyframes go straight to the mapper.
+        """
         if self.mapper is None:
             return {"success": False, "error": "No model selected — choose a model first.",
                     "keyframe_count": 0}
         self._drain()
         with self._paths_lock:
             entries = sorted(self._buffer, key=lambda e: e["seq"])
-            paths = [e["path"] for e in entries]
-            self._reconstructed_gps = [e["gps"] for e in entries]
-        if not paths:
+        if not entries:
             return {"success": False, "error": "No keyframes collected yet",
                     "keyframe_count": 0}
-        print(f"Reconstructing {len(paths)} keyframes (cap={self.max_keyframes})")
+
+        cap = self.max_keyframes
+        if cap and not self.selector.keep_all and len(entries) > cap:
+            print(f"Collected {len(entries)} keyframes > cap {cap}; "
+                  f"tightening selection...")
+            keep = self.selector.refine_to_cap([e["path"] for e in entries], cap)
+            entries = [entries[i] for i in keep]
+
+        paths = [e["path"] for e in entries]
+        self._reconstructed_gps = [e["gps"] for e in entries]
+        print(f"Reconstructing {len(paths)} keyframes (cap={cap})")
         return self.mapper.process_keyframes(paths, params)
 
     def get_latest_results(self) -> Dict[str, Any]:
