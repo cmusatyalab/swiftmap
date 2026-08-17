@@ -1,8 +1,7 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
 """Shared point-cloud primitives (pure numpy/trimesh): color flattening, confidence
-masks, trimesh point clouds and scenes, PLY writing, and the scene-alignment
-transforms. A leaf that ``types``, ``map`` and the pipeline build on; single-consumer
+masks, trimesh point clouds and scenes, and PLY writing. A leaf that ``types``, ``map`` and the pipeline build on; single-consumer
 geometry lives with its consumer instead."""
 
 import numpy as np
@@ -137,28 +136,3 @@ def write_ply(path, points, colors, confidence=None, comments=None) -> str:
 
 
 # ------------------------------------------------------------- scene alignment
-def opengl_conversion_matrix() -> np.ndarray:
-    """4x4 matrix flipping the y and z axes (trimesh <-> OpenGL viewer convention)."""
-    m = np.identity(4)
-    m[1, 1] = -1
-    m[2, 2] = -1
-    return m
-
-
-def transform_points(transformation: np.ndarray, points: np.ndarray, dim: int = None) -> np.ndarray:
-    """Apply a 4x4 ``transformation`` to (..., D) ``points``."""
-    points = np.asarray(points)
-    initial_shape = points.shape[:-1]
-    dim = dim or points.shape[-1]
-    t = transformation.swapaxes(-1, -2)
-    points = points @ t[..., :-1, :] + t[..., -1:, :]
-    return points[..., :dim].reshape(*initial_shape, dim)
-
-
-def apply_scene_alignment(scene, extrinsics_matrices: np.ndarray):
-    """Align a trimesh scene to the first camera's view (OpenGL flip + 180deg about y)."""
-    from scipy.spatial.transform import Rotation
-    align = np.eye(4)
-    align[:3, :3] = Rotation.from_euler("y", 180, degrees=True).as_matrix()
-    scene.apply_transform(np.linalg.inv(extrinsics_matrices[0]) @ opengl_conversion_matrix() @ align)
-    return scene

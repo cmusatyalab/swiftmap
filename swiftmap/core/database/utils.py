@@ -33,34 +33,16 @@ def _view_path(m: Map, kind: str, conf_level) -> str:
 
 
 def _render_scene(m: Map, conf_level):
-    if m.is_merged:
-        return _render_merged_scene(m, conf_level)
+    """Point cloud + camera frustums in world coords -- same path for raw and merged."""
     try:
-        from swiftmap.core.pipeline.reconstructor.scene_export import predictions_to_glb
-        preds = predictions(m)
-        has_images = bool(glob.glob(os.path.join(m.path, "images", "*")))
-        scene = predictions_to_glb(
-            predictions=preds, conf_thres=float(conf_level), filter_by_frames="all",
-            mask_black_bg=False, mask_white_bg=False, show_cam=True,
-            mask_sky=has_images, mask_dynamic=False, target_dir=m.path)
+        data = m.load(conf_thres=0.0)
+        keep = geometry.confidence_mask(data.conf, conf_level)
+        scene = geometry.pointcloud_scene(data.points[keep], data.colors[keep], data.frames)
         path = _view_path(m, "reconstruction", conf_level)
         scene.export(path)
         return path
     except Exception as e:
         print(f"[map] reconstruction render failed: {e}")
-        return _fallback(m, "scene.glb")
-
-
-def _render_merged_scene(m: Map, conf_level):
-    try:
-        z = np.load(os.path.join(m.path, "merged_points.npz"))
-        keep = geometry.confidence_mask(z["conf"], conf_level)
-        scene = geometry.pointcloud_scene(z["points"][keep], z["colors"][keep], m.frames)
-        path = _view_path(m, "reconstruction", conf_level)
-        scene.export(path)
-        return path
-    except Exception as e:
-        print(f"[map] merged reconstruction render failed: {e}")
         return _fallback(m, "scene.glb")
 
 

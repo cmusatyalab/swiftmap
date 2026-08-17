@@ -65,16 +65,6 @@ def masks_to_points(predictions: Dict[str, Any], masks: np.ndarray,
     return pts, cols
 
 
-def _extrinsics_4x4(predictions: Dict[str, Any]) -> Optional[np.ndarray]:
-    if "extrinsic" not in predictions:
-        return None
-    ext = np.asarray(predictions["extrinsic"])          # (S, 3, 4)
-    m = np.zeros((ext.shape[0], 4, 4))
-    m[:, :3, :4] = ext
-    m[:, 3, 3] = 1.0
-    return m
-
-
 def export_highlight_glb(predictions: Dict[str, Any], masks: np.ndarray,
                          query: str, target_dir: str,
                          conf_thres: Optional[float] = None) -> Optional[str]:
@@ -104,9 +94,6 @@ def export_highlight_glb(predictions: Dict[str, Any], masks: np.ndarray,
 
     scene = trimesh.Scene()
     scene.add_geometry(geometry.pointcloud(pts, cols))
-    ext = _extrinsics_4x4(predictions)
-    if ext is not None:
-        scene = geometry.apply_scene_alignment(scene, ext)
 
     safe = "".join(c if c.isalnum() else "_" for c in query.strip()) or "query"
     path = os.path.join(target_dir, f"segmented_{safe}.glb")

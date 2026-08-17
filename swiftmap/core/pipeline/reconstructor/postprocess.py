@@ -27,7 +27,9 @@ from typing import Any, Dict
 import numpy as np
 import torch
 
-from swiftmap.core.pipeline.reconstructor.scene_export import predictions_to_glb
+from swiftmap.core.pipeline.reconstructor import sky_mask
+from swiftmap.core.primitives import geometry
+from swiftmap.core.primitives.types import Georeference, Reconstruction
 
 try:
     from swiftmap.core.pipeline.reconstructor.confidence_mapping import generate_confidence_point_cloud
@@ -113,17 +115,7 @@ def generate_3d_content(predictions: Dict[str, Any],
             image_paths_in_target.append(dst_path)
         print(f"Copied {len(keyframe_paths)} keyframes to {target_dir_images}")
 
-        scene = predictions_to_glb(
-            predictions=predictions,
-            conf_thres=params["conf_threshold"],
-            filter_by_frames="all",
-            mask_black_bg=params["mask_black_bg"],
-            mask_white_bg=params["mask_white_bg"],
-            show_cam=params["show_cam"],
-            mask_sky=params["mask_sky"],
-            mask_dynamic=params["mask_dynamic"],
-            target_dir=target_dir,
-        )
+        scene = preview_scene(predictions, params, target_dir)
 
         glb_path = os.path.join(target_dir, "scene.glb")
         scene.export(glb_path)
@@ -196,3 +188,26 @@ def generate_confidence_mapping(predictions: Dict[str, Any],
     except Exception as e:
         print(f"Error generating confidence mapping: {e}")
         return {"error": str(e)}
+
+
+_LOCAL_FRAME = {"scale": 1.0, "rotation": np.eye(3).tolist(), "translation": [0.0, 0.0, 0.0],
+                "lat0": 0.0, "lon0": 0.0, "alt0": 0.0}
+
+
+def preview_scene(predictions, params, target_dir):
+    """The run's preview GLB: confidence-filtered cloud + camera frustums, in local coords."""
+    recon = Reconstruction.wrap(predictions)
+    pts, conf = _point_conf_keys(predictions)
+    if params.get("mask_sky"):
+        conf = sky_mask.apply_sky_mask(np.array(conf, dtype=float), target_dir)
+    preds = dict(predictions)
+    preds["world_points"], preds["world_points_conf"] = pts, conf
+    frames = []
+    if params.get("show_cam") and "extrinsic" in predictions:
+        positions, rotations = camera_poses_from_extrinsics(predictions["extrinsic"])
+        frames = [{"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()}
+                  for p, R in zip(positions, rotations)]
+    data = Reconstruction.wrap(preds).to_mapdata(
+        Georeference(_LOCAL_FRAME), frames=frames,
+        conf_percentile=params["conf_threshold"])
+    return geometry.pointcloud_scene(data.points, data.colors, data.frames)

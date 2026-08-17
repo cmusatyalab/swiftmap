@@ -149,9 +149,9 @@ class Map:
         A merged map's cloud is already confidence-filtered and loaded verbatim; a raw
         ``predictions.npz`` gets the ``conf_thres`` percentile cut.
         """
-        gt = self.transform
-        if gt is None:
-            raise FileNotFoundError(f"{self.tag} has no transform.json (not GPS-aligned).")
+        gt = self.transform or Georeference(
+            {"scale": 1.0, "rotation": np.eye(3).tolist(), "translation": [0.0, 0.0, 0.0],
+             "lat0": 0.0, "lon0": 0.0, "alt0": 0.0})  # not GPS-aligned yet: local frame
         frames = self.frames
 
         flat = os.path.join(self.path, "merged_points.npz")
