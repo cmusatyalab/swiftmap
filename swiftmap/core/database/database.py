@@ -6,8 +6,8 @@
                    transform.json, map.json)
     <root>/site/   the ``Site`` -- same layout, grown by merging each stored map in
 
-Everything callers need is here: store a batch, grow the site, list/resolve tags,
-render and segment a map.
+Storage only: store a batch, grow the site, list/resolve tags. Rendering and
+segmentation are pipeline stages that take a ``Map``.
 """
 
 import os
@@ -15,7 +15,6 @@ import shutil
 from datetime import datetime
 from typing import List, Optional
 
-from swiftmap.core.database import utils
 from swiftmap.core.database.map import Map
 from swiftmap.core.database.site import Site
 
@@ -66,17 +65,6 @@ class Database:
         """Grow the site with a stored map."""
         return self.site.grow(new_map, conf_thres=conf_thres, voxel_size=voxel_size,
                               created=created)
-
-    def render_map(self, tag: str, conf_level: float) -> dict:
-        """Render the site or a stored map: GLB views at ``conf_level`` in its dir."""
-        m = self.get(tag)
-        return utils.render(m, conf_level) if m else {"error": f"Unknown map '{tag}'."}
-
-    def segment_map(self, tag: str, query: str, segmenter, conf_threshold: float = 60.0) -> dict:
-        """Segment ``query`` on the site or a stored map, writing results in its dir."""
-        m = self.get(tag)
-        return utils.segment(m, query, segmenter, conf_threshold) if m \
-            else {"error": f"Unknown map '{tag}'."}
 
     def delete(self, tag: str) -> bool:
         """Delete a stored map (the site is never deleted here)."""

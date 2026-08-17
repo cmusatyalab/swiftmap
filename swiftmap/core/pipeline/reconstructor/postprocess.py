@@ -32,7 +32,7 @@ from swiftmap.core.primitives import geometry
 from swiftmap.core.primitives.types import Georeference, Reconstruction
 
 try:
-    from swiftmap.core.pipeline.reconstructor.confidence_mapping import generate_confidence_point_cloud
+    from swiftmap.core.pipeline.renderer.confidence import generate_confidence_point_cloud
     CONFIDENCE_MAPPING_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional viz deps
     CONFIDENCE_MAPPING_AVAILABLE = False

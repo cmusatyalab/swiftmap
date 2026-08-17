@@ -20,8 +20,12 @@ All distances are scale-relative (VGGT world coordinates are unitless), derived 
 scene's bounding-box diagonal, so the planner works regardless of the scene's scale.
 """
 
+import json
+import os
+
 import numpy as np
 
+from swiftmap.core.primitives import kml
 from swiftmap.core.primitives.types import Reconstruction
 from typing import Dict, Optional
 
@@ -199,3 +203,40 @@ class NextFlightPlanner:
             },
             "statistics": {"message": msg, "scene_diagonal": diag},
         }
+
+
+def write_plan(plan, gps_transform, target_dir, segmented=None, seg_query=None) -> str:
+    """Write next_flight_viewpoints.json (+ transform.json + KML when GPS-aligned)."""
+    viewpoints = _viewpoints_payload(plan)
+    out = {"num_viewpoints": len(viewpoints), "thresholds": plan.get("thresholds", {}),
+           "gps_aligned": gps_transform is not None, "viewpoints": viewpoints}
+    if segmented:
+        out["segmented_objects"] = {"query": seg_query, "num_objects": len(segmented),
+                                    "objects": segmented}
+    path = _dump(target_dir, "next_flight_viewpoints.json", out)
+    if gps_transform is not None:
+        _dump(target_dir, "transform.json", gps_transform.cfg)
+        kml.write_kml(viewpoints, os.path.join(target_dir, "next_flight_viewpoints.kml"),
+                      gps_key="target_gps", doc_name="nfn_pts")
+        kml.write_polygon_kml(viewpoints, os.path.join(target_dir, "next_flight_area.kml"),
+                              gps_key="target_gps", doc_name="nfn_area")
+    return path
+
+
+def _viewpoints_payload(plan) -> list:
+    """Per-viewpoint records from an NFN plan (GPS keys copied when tagged)."""
+    out = []
+    for i, vp in enumerate(plan.get("viewpoints", [])):
+        item = {"id": i, "cluster_id": int(vp.get("cluster_id", -1)),
+                "position": np.asarray(vp["camera_position"], float).tolist(),
+                "look_dir": np.asarray(vp["camera_rotation"], float)[:, 2].tolist(),
+                "target": np.asarray(vp["target"], float).tolist(),
+                "score": float(vp.get("score", 0.0))}
+        for k in ("camera_position_gps", "target_gps"):
+            if k in vp:
+                item["position_gps" if k == "camera_position_gps" else k] = vp[k]
+        out.append(item)
+    return out
+
+
+# ----------------------------------------------------------------------- shared

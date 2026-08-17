@@ -14,6 +14,8 @@ This module:
   * ``cluster_objects``   v1 spatial clustering -> one centroid per object
 """
 
+import glob
+import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,7 +23,8 @@ import numpy as np
 import trimesh
 
 from swiftmap.core import constants
-from swiftmap.core.primitives import geometry
+from swiftmap.core.database.map import Map
+from swiftmap.core.primitives import geometry, kml
 
 RED = np.array([255, 0, 0], dtype=np.uint8)
 # Cap on segmented points fed to clustering (subsampled if exceeded) to bound cost.
@@ -152,3 +155,105 @@ def cluster_objects(points: np.ndarray,
     # Largest (most-supported) objects first.
     objects.sort(key=lambda o: o["num_points"], reverse=True)
     return objects
+
+
+def segment(m: Map, query: str, segmenter, conf_threshold: float = 60.0) -> dict:
+    """Segment ``query`` on ``m``. A merged map has no per-frame images, so it returns
+    its inherited segmentation instead of running a new query."""
+    if not m.exists():
+        return {"error": f"Unknown map '{m.tag}'."}
+    if m.is_merged:
+        return _inherited(m, query)
+
+    query = (query or "").strip()
+    if not query:
+        return {"error": "Enter a segmentation query (e.g. 'person')."}
+    preds = m.predictions
+    if "world_points" not in preds or "images" not in preds:
+        return {"error": f"Map '{m.tag}' has no reconstruction to segment."}
+
+    masks = segmenter.segment(lift.frame_images(preds), query)
+    if masks is None:
+        return {"error": "Segmentation model failed to initialize."}
+    glb = lift.export_highlight_glb(preds, masks, query, m.path, conf_thres=conf_threshold)
+    pts, _ = lift.masks_to_points(preds, masks, conf_thres=conf_threshold)
+
+    wp = np.asarray(preds["world_points"]).reshape(-1, 3)
+    wp = wp[np.isfinite(wp).all(1)]
+    diag = float(np.linalg.norm(wp.max(0) - wp.min(0))) if len(wp) else 1.0
+
+    gt = m.transform
+    items = []
+    for i, ob in enumerate(lift.cluster_objects(pts, diag)):
+        item = {"id": i, "position": np.asarray(ob["centroid"], float).tolist(),
+                "num_points": int(ob["num_points"]), "radius": float(ob["radius"])}
+        if gt is not None:
+            item["position_gps"] = np.asarray(gt.to_lla(ob["centroid"]), float).tolist()
+        items.append(item)
+
+    _write_segmented(m, query, conf_threshold, gt is not None, items)
+    print(f"[map] segmented '{query}' on {m.tag}: {len(pts)} pts -> {len(items)} object(s)")
+    return {"success": True, "map_tag": m.tag, "query": query, "glb_path": glb,
+            "conf_threshold": float(conf_threshold), "num_points": int(len(pts)),
+            "num_objects": len(items), "gps_aligned": gt is not None, "objects": items}
+
+
+def _inherited(m: Map, query):
+    """The segmentation a merged map carries, matching ``query`` when possible."""
+    safe = _safe(query)
+    glbs = sorted(glob.glob(os.path.join(m.path, "segmented_*.glb")))
+    if not glbs:
+        return {"error": f"'{m.tag}' is a merged map (no per-frame images to segment) and "
+                         "has no inherited segmentation."}
+    match = [g for g in glbs if safe and os.path.basename(g) == f"segmented_{safe}.glb"]
+    glb = match[0] if match else glbs[0]
+    base = os.path.basename(glb)[len("segmented_"):-len(".glb")]
+    meta = {}
+    jp = os.path.join(m.path, f"segmented_{base}.json")
+    if os.path.isfile(jp):
+        with open(jp) as f:
+            meta = json.load(f)
+    objects = meta.get("objects", [])
+    return {"success": True, "map_tag": m.tag, "query": meta.get("query", base),
+            "glb_path": glb, "inherited": True,
+            "conf_threshold": float(meta.get("conf_threshold", 0.0)), "num_points": 0,
+            "num_objects": meta.get("num_objects", len(objects)),
+            "gps_aligned": meta.get("gps_aligned", True), "objects": objects}
+
+
+def _write_segmented(m: Map, query, conf, gps_aligned, items):
+    safe = _safe(query) or "query"
+    m._dump(f"segmented_{safe}.json",
+            {"map_tag": m.tag, "query": query, "conf_threshold": float(conf),
+             "gps_aligned": gps_aligned, "num_objects": len(items), "objects": items})
+    gps_items = [it for it in items if "position_gps" in it]
+    if gps_items:
+        kml.write_kml(gps_items, os.path.join(m.path, f"segmented_{safe}.kml"),
+                      gps_key="position_gps", doc_name=f"{m.tag}: {query}")
+
+
+# --------------------------------------------------------------------- NFN plan
+
+
+def write_segmented_objects(items, seg_query, conf_threshold, gps_transform, target_dir) -> str:
+    """Write segmented_objects.json (+ KML when any object has GPS)."""
+    path = _dump(target_dir, "segmented_objects.json",
+                 {"query": seg_query, "conf_threshold": conf_threshold,
+                  "gps_aligned": gps_transform is not None,
+                  "num_objects": len(items), "objects": items})
+    gps_items = [s for s in items if "position_gps" in s]
+    if gps_items:
+        kml.write_kml(gps_items, os.path.join(target_dir, "segmented_objects.kml"),
+                      gps_key="position_gps", doc_name=f"SwiftMap Segmented: {seg_query}")
+    return path
+
+
+def _safe(text) -> str:
+    return "".join(c if c.isalnum() else "_" for c in (text or "").strip())
+
+
+def _dump(target_dir, name, obj) -> str:
+    path = os.path.join(target_dir, name)
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+    return path

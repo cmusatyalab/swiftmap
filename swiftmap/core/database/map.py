@@ -4,7 +4,7 @@
 
 Holds a raw ``predictions.npz`` (a reconstructed batch) or a merged ``merged_points.npz``
 plus transform/camera/map json. It is the store record -- identity, metadata, ``load``
-(-> MapData) and ``write`` (MapData -> dir); derived files come from ``utils``."""
+(-> MapData) and ``write`` (MapData -> dir); previews and segmentation come from the pipeline."""
 
 import glob
 import json
@@ -15,7 +15,6 @@ from typing import List, Optional
 
 import numpy as np
 
-from swiftmap.core.primitives import geometry
 from swiftmap.core.primitives.types import Georeference, MapData, Reconstruction
 
 # write() imports confidence_mapping on demand: it is a heavy dep needed only there.
@@ -142,6 +141,12 @@ class Map:
                 return json.load(f).get("frames", [])
         return []
 
+    @property
+    def predictions(self) -> dict:
+        """The raw prediction arrays of a non-merged map."""
+        npz = np.load(os.path.join(self.path, "predictions.npz"), allow_pickle=True)
+        return {k: npz[k] for k in npz.files if k != "metadata"}
+
     # ---------------------------------------------------------------- geometry
     def load(self, conf_thres: float = 50.0) -> MapData:
         """Load this map's geometry into a MapData (merged flat, or raw predictions).
@@ -166,9 +171,9 @@ class Map:
     # ------------------------------------------------------------- persistence
     def write(self, mapdata: MapData, source_maps=(), site: str = None,
               created: datetime = None) -> "Map":
-        """Persist ``mapdata`` into this dir: cloud, transform, poses, scene/confidence, map.json."""
-        from swiftmap.core.pipeline.reconstructor.confidence_mapping import generate_confidence_point_cloud
+        """Persist ``mapdata`` into this dir: cloud, transform, poses, map.json.
 
+        Data only -- previews come from ``pipeline.renderer.write_previews``."""
         created = created or datetime.now()
         site = site or self.metadata.get("site") or "map"
         os.makedirs(self.path, exist_ok=True)
@@ -189,15 +194,6 @@ class Map:
                    {"metadata": {"frame": "ENU meters about origin (lat0, lon0, alt0)",
                                  "source_maps": sources, "num_keyframes": len(frames)},
                     "frames": frames})
-
-        geometry.pointcloud_scene(pts, cols, frames).export(os.path.join(self.path, "scene.glb"))
-        try:
-            scene, _, _ = generate_confidence_point_cloud(
-                pts, conf, conf_threshold=0.0, max_points=500000, save_ply=True,
-                ply_path=os.path.join(self.path, "confidence_map.ply"))
-            scene.export(os.path.join(self.path, "confidence_map.glb"))
-        except Exception as e:
-            print(f"[map] confidence map export failed: {e}")
 
         center = Georeference(tf).to_lla(pts.mean(axis=0)) if len(pts) else np.array(o)
         self._meta = _metadata(self.tag, site, created, len(frames), center, sources,

@@ -31,6 +31,8 @@ from typing import List, Optional
 from swiftmap.core import constants
 from swiftmap.core.transport import protocol
 from swiftmap.core.database import Database
+from swiftmap.core.pipeline import renderer
+from swiftmap.core.pipeline.segmentor import lift
 from swiftmap.core.session import MappingSession
 
 
@@ -186,6 +188,7 @@ class AutoMappingServer:
             stored = self.db.store(target_dir, created)
             self.db.grow(stored, conf_thres=self.cfg.conf_threshold,
                          voxel_size=self.cfg.merge_voxel, created=created)
+            renderer.write_previews(self.db.site)
             n_points = int(self.db.site.metadata.get("num_points", 0))
             n_cameras = len(self.db.site.frames)
 
@@ -276,7 +279,8 @@ class AutoMappingServer:
     def render_map(self, map_tag: str, conf_level: float) -> dict:
         """Reconstruction + confidence-at-``conf_level`` GLBs for a stored map."""
         with self._lock:
-            return self.db.render_map(map_tag, conf_level)
+            m = self.db.get(map_tag)
+            return renderer.render(m, conf_level) if m else {"error": f"Unknown map '{map_tag}'."}
 
     def segment_map(self, map_tag: str, query: str, conf_level: float = None) -> dict:
         """Segment ``query`` on a stored ``map_tag`` at ``conf_level`` (request-driven).
@@ -286,7 +290,9 @@ class AutoMappingServer:
         """
         conf = self.cfg.conf_threshold if conf_level is None else float(conf_level)
         with self._lock:
-            res = self.db.segment_map(map_tag, query, self.session.segmenter, conf)
+            m = self.db.get(map_tag)
+            res = lift.segment(m, query, self.session.segmenter, conf) if m \
+                else {"error": f"Unknown map '{map_tag}'."}
         glb = res.get("glb_path")
         if glb and not os.path.isabs(glb):
             res["glb_path"] = os.path.abspath(glb)

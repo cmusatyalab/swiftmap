@@ -27,7 +27,9 @@ class Site(Map):
 
     def grow(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
              created: datetime = None) -> "Site":
-        """Merge ``new_map`` into the site (origin pinned to the site) and rewrite it."""
+        """Merge ``new_map`` into the site (origin pinned to the site) and rewrite its data.
+
+        Previews are a pipeline concern: the caller runs ``renderer.write_previews``."""
         parts = [self.load()] if self.exists() else []
         parts.append(new_map.load(conf_thres))
         merged = MapData.merge(parts, voxel_size=voxel_size)

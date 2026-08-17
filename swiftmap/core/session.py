@@ -40,7 +40,7 @@ from swiftmap.core.pipeline.keyframe_selector import KeyframeSelector
 from swiftmap.core.transport.tcp_server import MappingTCPServer
 from swiftmap.core.pipeline.reconstructor import get_mapper, available_mappers, is_registered
 from swiftmap.core.pipeline.segmentor import get_segmenter, available_segmenters, lift
-from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner
+from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner, write_plan
 from swiftmap.core.pipeline.gps_transformer import GpsTransformer
 
 
@@ -629,9 +629,8 @@ class MappingSession:
         """Write the latest NFN plan (GPS-tagged when aligned) to the run dir."""
         if not self.latest_plan:
             return None
-        from swiftmap.core.database import write_nfn_plan, write_segmented_objects
         seg = self.latest_segmentation
-        return write_nfn_plan(
+        return write_plan(
             self.latest_plan, self.gps_transform, self._target_dir(),
             segmented=self._segmented_object_items(),
             seg_query=seg.get("query") if seg else None)
@@ -665,8 +664,7 @@ class MappingSession:
         items = self._segmented_object_items()
         if not items:
             return None
-        from swiftmap.core.database import write_nfn_plan, write_segmented_objects
-        return write_segmented_objects(
+        return lift.write_segmented_objects(
             items, seg.get("query"), seg.get("conf_threshold"),
             self.gps_transform, seg.get("target_dir") or self._target_dir())
     def export_camera_poses(self) -> Optional[str]:

@@ -7,6 +7,6 @@ confidence-difference of the map: points in the [P_low, P_high) confidence band 
 clustered and turned into suggested viewpoints. See planner.NextFlightPlanner.
 """
 
-from .planner import NextFlightPlanner
+from .planner import NextFlightPlanner, write_plan
 
-__all__ = ["NextFlightPlanner"]
+__all__ = ["NextFlightPlanner", "write_plan"]
