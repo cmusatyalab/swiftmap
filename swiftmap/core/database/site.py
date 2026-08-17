@@ -23,7 +23,7 @@ class Site(Map):
     @property
     def sources(self) -> list:
         """Tags of the maps merged in so far."""
-        return list(self.metadata.get("source_maps", []))
+        return list(self.metadata.source_maps)
 
     def grow(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
              created: datetime = None) -> "Site":

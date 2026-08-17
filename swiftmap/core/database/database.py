@@ -6,12 +6,11 @@
                    transform.json, map.json)
     <root>/site/   the ``Site`` -- same layout, grown by merging each stored map in
 
-Storage only: store a batch, grow the site, list/resolve tags. Rendering and
+Storage only: create a map, grow the site, list/resolve tags. Rendering and
 segmentation are pipeline stages that take a ``Map``.
 """
 
 import os
-import shutil
 from datetime import datetime
 from typing import List, Optional
 
@@ -50,15 +49,14 @@ class Database:
             return self.site if self.site.exists() else None
         return Map.get(self.maps_dir, tag)
 
-    def store(self, batch_dir: str, created: datetime = None) -> Map:
-        """Move a reconstructed batch into ``maps/`` and stamp it as a stored map."""
+    def create_map(self, created: datetime = None) -> Map:
+        """Create an empty map under ``maps/`` for a run to write into."""
         created = created or datetime.now()
-        os.makedirs(self.maps_dir, exist_ok=True)
-        stored = Map(os.path.join(self.maps_dir, Map.tag_for("map", created)))
-        shutil.move(batch_dir, stored.path)
-        stored.stamp_metadata(self.site.name, created)
-        print(f"[db] stored map '{stored.tag}' ({len(stored.frames)} cameras)")
-        return stored
+        m = Map(os.path.join(self.maps_dir, Map.tag_for("map", created)))
+        os.makedirs(m.path, exist_ok=True)
+        m.stamp_metadata(self.site.name, created)
+        print(f"[db] created map '{m.tag}'")
+        return m
 
     def grow(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
              created: datetime = None) -> Site:

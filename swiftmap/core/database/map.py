@@ -10,6 +10,7 @@ import glob
 import json
 import os
 import shutil
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import List, Optional
 
@@ -32,17 +33,39 @@ def _meta_path(dir_path: str) -> Optional[str]:
     return None
 
 
-def _metadata(tag, site, created, num_keyframes, center, source_maps, num_points=None) -> dict:
-    """The ``map.json`` payload, shared by merged writes and stored batches."""
-    meta = {"map_tag": tag, "site": site, "created": created.isoformat(timespec="seconds"),
-            "num_keyframes": int(num_keyframes), "gps_aligned": center is not None,
-            "source_maps": list(source_maps)}
-    if num_points is not None:
-        meta["num_points"] = int(num_points)
-    if center is not None:
-        meta["center_gps"] = [float(center[0]), float(center[1]), float(center[2])]
-        meta["geohash"] = geohash_encode(float(center[0]), float(center[1]))
-    return meta
+@dataclass
+class MapMetaData:
+    """What ``map.json`` holds: a map's identity and summary."""
+
+    map_tag: str
+    site: str = "map"
+    created: str = ""
+    num_keyframes: int = 0
+    num_points: int = 0
+    gps_aligned: bool = False
+    center_gps: Optional[list] = None
+    geohash: Optional[str] = None
+    source_maps: list = field(default_factory=list)
+
+    @classmethod
+    def load(cls, path: str) -> "MapMetaData":
+        with open(path) as f:
+            raw = json.load(f)
+        known = {k: v for k, v in raw.items() if k in cls.__dataclass_fields__}
+        known.setdefault("map_tag", os.path.basename(os.path.dirname(path)))
+        return cls(**known)
+
+    def with_center(self, center) -> "MapMetaData":
+        """Set the GPS center (and its geohash) from a [lat, lon, alt]."""
+        if center is None:
+            return self
+        self.center_gps = [float(center[0]), float(center[1]), float(center[2])]
+        self.geohash = geohash_encode(self.center_gps[0], self.center_gps[1])
+        self.gps_aligned = True
+        return self
+
+    def asdict(self) -> dict:
+        return asdict(self)
 
 
 def geohash_encode(lat: float, lon: float, precision: int = 9) -> str:
@@ -119,11 +142,17 @@ class Map:
         return os.path.isfile(os.path.join(self.path, "merged_points.npz"))
 
     @property
-    def metadata(self) -> dict:
+    def metadata(self) -> MapMetaData:
         if self._meta is None:
             p = _meta_path(self.path)
-            self._meta = json.load(open(p)) if p else {}
+            self._meta = MapMetaData.load(p) if p else MapMetaData(map_tag=self.tag)
         return self._meta
+
+    def save_metadata(self, meta: MapMetaData) -> MapMetaData:
+        """Persist ``meta`` as this map's ``map.json``."""
+        self._meta = meta
+        self._dump("map.json", meta.asdict())
+        return meta
 
     @property
     def transform(self) -> Optional[Georeference]:
@@ -175,7 +204,7 @@ class Map:
 
         Data only -- previews come from ``pipeline.renderer.write_previews``."""
         created = created or datetime.now()
-        site = site or self.metadata.get("site") or "map"
+        site = site or self.metadata.site or "map"
         os.makedirs(self.path, exist_ok=True)
 
         pts = np.asarray(mapdata.points)
@@ -196,9 +225,10 @@ class Map:
                     "frames": frames})
 
         center = Georeference(tf).to_lla(pts.mean(axis=0)) if len(pts) else np.array(o)
-        self._meta = _metadata(self.tag, site, created, len(frames), center, sources,
-                               num_points=len(pts))
-        self._dump("map.json", self._meta)
+        self.save_metadata(MapMetaData(
+            map_tag=self.tag, site=site, created=created.isoformat(timespec="seconds"),
+            num_keyframes=len(frames), num_points=int(len(pts)),
+            source_maps=sources).with_center(center))
         print(f"[map] wrote '{self.tag}': {len(pts):,} pts, {len(frames)} cameras")
         return self
 
@@ -215,9 +245,9 @@ class Map:
             cams = np.asarray([f["camera_position_world"] for f in frames], float) if frames else None
             center = np.asarray(gt.to_lla(cams.mean(axis=0)), float) if cams is not None \
                 else np.array([gt.lat0, gt.lon0, gt.alt0])
-        self._meta = _metadata(self.tag, site, created, len(frames), center, source_maps)
-        self._dump("map.json", self._meta)
-        return self._meta
+        return self.save_metadata(MapMetaData(
+            map_tag=self.tag, site=site, created=created.isoformat(timespec="seconds"),
+            num_keyframes=len(frames), source_maps=list(source_maps)).with_center(center))
 
     def _dump(self, name: str, obj):
         with open(os.path.join(self.path, name), "w") as f:

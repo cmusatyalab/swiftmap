@@ -21,7 +21,6 @@ working dir at a mounted volume puts the site on the host.
 """
 
 import os
-import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -58,8 +57,6 @@ class ServerConfig:
 
 class AutoMappingServer:
     """Collects keyframes over TCP; at the cap, stores the batch and grows the ``Site``."""
-
-    _STAGING = "_staging"
 
     def __init__(self, config: ServerConfig):
         self.cfg = config
@@ -146,12 +143,12 @@ class AutoMappingServer:
         t0 = time.time()
         n = self.session.get_keyframe_count()
         created = datetime.now()
-        staging = os.path.join(self._root, self._STAGING)
-        shutil.rmtree(staging, ignore_errors=True)
-        print(f"\n[swiftmap-server] === run #{run}: {n} keyframes -> batch ===")
+        grew = self.db.site.exists()
+        new_map = self.db.create_map(created)
+        print(f"\n[swiftmap-server] === run #{run}: {n} keyframes -> {new_map.tag} ===")
         try:
             params = {
-                "output_name": self._STAGING,
+                "output_name": new_map.path,
                 "conf_threshold": float(self.cfg.conf_threshold),
                 "mask_sky": self.cfg.mask_sky,
                 "mask_dynamic": self.cfg.mask_dynamic,
@@ -164,7 +161,7 @@ class AutoMappingServer:
                 print(f"[swiftmap-server] run #{run} reconstruction failed: "
                       f"{result.get('error')}")
                 return
-            target_dir = result.get("scene_results", {}).get("target_directory") or staging
+            target_dir = new_map.path
 
             if not self.session.has_stream_gps():
                 print("[swiftmap-server] grow mode requires GPS; no streamed GPS -> batch dropped")
@@ -183,13 +180,13 @@ class AutoMappingServer:
             self.session.export_nfn_plan()
             self._send_nfn_kml(target_dir)
 
-            # Store this batch as a map under maps/, then grow the site with it.
-            grew = self.db.site.exists()
-            stored = self.db.store(target_dir, created)
+            # The batch is already a stored map; grow the site with it.
+            new_map.stamp_metadata(self.cfg.site, created)
+            stored = new_map
             self.db.grow(stored, conf_thres=self.cfg.conf_threshold,
                          voxel_size=self.cfg.merge_voxel, created=created)
             renderer.write_previews(self.db.site)
-            n_points = int(self.db.site.metadata.get("num_points", 0))
+            n_points = self.db.site.metadata.num_points
             n_cameras = len(self.db.site.frames)
 
             self.latest_run = {
@@ -210,7 +207,9 @@ class AutoMappingServer:
             print(f"[swiftmap-server] run #{run} pipeline error: {e}")
             traceback.print_exc()
         finally:
-            shutil.rmtree(staging, ignore_errors=True)
+            if not self.latest_run.get("run") == run:
+                new_map.delete()  # the run bailed out: drop the half-built map
+                print(f"[swiftmap-server] discarded '{new_map.tag}'")
             self.session.clear_keyframes()
             self._processing = False
 
