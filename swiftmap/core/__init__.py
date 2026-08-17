@@ -12,7 +12,7 @@ SwiftMap core components:
 
 from swiftmap.core.session import MappingSession
 from swiftmap.core.transport.tcp_server import MappingTCPServer
-from swiftmap.core.pipeline.keyframe_selector import KeyframeSelector
+from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.pipeline.reconstructor import (
     BaseMapper, VGGTMapper, VGGTOmegaMapper, get_mapper, available_mappers)
 from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner

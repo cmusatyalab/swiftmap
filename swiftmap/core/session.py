@@ -7,7 +7,7 @@ The orchestration layer for one mapping run. A ``MappingSession`` is the single
 middle layer between the frontend and the core stages — it owns and coordinates
 all of them:
 
-    collection :  MappingTCPServer (transport) + KeyframeSelector (decision)
+    collection :  MappingTCPServer + KeyframeSelector (transport: ingest + decision)
     mapping    :  VGGTMapper       (reconstruction + confidence)
     alignment  :  GpsTransformer   (local -> GPS)
     planning   :  NextFlightPlanner (NFN)
@@ -36,7 +36,7 @@ import numpy as np
 
 from swiftmap.core import constants
 from swiftmap.core.transport import protocol
-from swiftmap.core.pipeline.keyframe_selector import KeyframeSelector
+from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.transport.tcp_server import MappingTCPServer
 from swiftmap.core.pipeline.reconstructor import get_mapper, available_mappers, is_registered
 from swiftmap.core.pipeline.segmentor import get_segmenter, available_segmenters, lift

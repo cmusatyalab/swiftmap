@@ -25,7 +25,7 @@ except PackageNotFoundError:      # running from source, not pip-installed
 # Main system components
 from swiftmap.core.session import MappingSession
 from swiftmap.core.transport.tcp_server import MappingTCPServer
-from swiftmap.core.pipeline.keyframe_selector import KeyframeSelector
+from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.pipeline.reconstructor import (
     BaseMapper, VGGTMapper, VGGTOmegaMapper, get_mapper, available_mappers)
 
@@ -37,7 +37,7 @@ except ImportError:
     MappingGradioInterface = None
 
 # Keyframe selection helper
-from swiftmap.core.pipeline.keyframe_selector import FrameTracker
+from swiftmap.core.transport.keyframe_selector import FrameTracker
 
 __all__ = [
     "MappingSession",

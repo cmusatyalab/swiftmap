@@ -17,7 +17,7 @@ import numpy as np
 from typing import Any, Dict, Optional
 
 from swiftmap.core import constants
-from swiftmap.core.pipeline.keyframe_selector.frame_tracker import FrameTracker
+from swiftmap.core.transport.keyframe_selector.frame_tracker import FrameTracker
 
 
 class KeyframeSelector:
