@@ -25,7 +25,6 @@ def generate_confidence_point_cloud(
     world_points: Union[torch.Tensor, np.ndarray],
     confidence: Union[torch.Tensor, np.ndarray], 
     conf_threshold: float = 0.6,
-    colormap: str = "red_to_green",
     max_points: Optional[int] = 50000,  # Reduced for better 3D performance
     point_size: float = 0.002,
     save_ply: bool = True,
@@ -38,7 +37,6 @@ def generate_confidence_point_cloud(
         world_points: 3D world coordinates, shape [S, H, W, 3] or [N, 3]
         confidence: Confidence scores, shape [S, H, W] or [N,]
         conf_threshold: Percentile threshold as decimal (0.0-1.0). E.g., 0.6 filters out bottom 60% of points
-        colormap: Matplotlib colormap name ('coolwarm', 'viridis', 'plasma', etc.)
         max_points: Maximum number of points to visualize (for performance)
         point_size: Visual size of points in the 3D scene
         save_ply: Generate PLY file with absolute confidence values alongside GLB scene
@@ -119,7 +117,7 @@ def generate_confidence_point_cloud(
         return empty_scene, stats
     
     # Generate colors based on confidence
-    colors = confidence_to_colors(filtered_conf, colormap=colormap)
+    colors = confidence_to_colors(filtered_conf)
     
     # Flip the point cloud coordinates to match GLB transformation
     # This fixes the "upside down" issue in the confidence viewer
@@ -140,22 +138,6 @@ def generate_confidence_point_cloud(
     
     # Camera setup is now handled by Gradio Model3D camera_position parameter
     # The coordinate flip above should resolve the orientation mismatch
-    
-    # Add confidence colorbar as a separate geometry (optional)
-    # Map custom colormaps to matplotlib equivalents for colorbar display
-    if colormap == "red_to_green":
-        colorbar_colormap = "RdYlGn"
-    elif colormap == "heatmap":
-        colorbar_colormap = "coolwarm"  # Blue-Red colormap that matches our heatmap concept
-    else:
-        colorbar_colormap = colormap
-    colorbar_mesh = create_confidence_colorbar(
-        conf_min=float(np.min(filtered_conf)),
-        conf_max=float(np.max(filtered_conf)),
-        colormap=colorbar_colormap
-    )
-    if colorbar_mesh is not None:
-        scene.add_geometry(colorbar_mesh, node_name="confidence_colorbar")
     
     # Calculate statistics
     stats = {
@@ -183,212 +165,15 @@ def generate_confidence_point_cloud(
     return scene, stats, ply_filename
 
 
-def confidence_to_colors(
-    confidence: np.ndarray, 
-    colormap: str = "RdYlGn"
-) -> np.ndarray:
-    """
-    Convert confidence scores to RGB colors using red-to-green quality mapping.
-    
-    Args:
-        confidence: Confidence scores array (should be post-filtered)
-        colormap: Colormap name (default: "RdYlGn" for red-yellow-green)
-        
-    Returns:
-        RGB colors array with shape [N, 4] (RGBA)
-    """
-    # Post-filter normalization: normalize the filtered confidence values to [0, 1]
-    # This ensures full color range utilization for the remaining points
-    conf_min, conf_max = np.min(confidence), np.max(confidence)
-    if conf_max > conf_min:
-        normalized_conf = (confidence - conf_min) / (conf_max - conf_min)
-    else:
-        normalized_conf = np.ones_like(confidence)
-    
-    # Use different colormap schemes for quality visualization
-    if colormap == "red_to_green":
-        # Custom red-to-green mapping (legacy)
-        colors = np.zeros((len(normalized_conf), 4), dtype=np.uint8)
-        for i, conf in enumerate(normalized_conf):
-            # Red to Green transition: (1-conf, conf, 0, 1)
-            red = int((1 - conf) * 255)
-            green = int(conf * 255)
-            blue = 0
-            alpha = 255
-            colors[i] = [red, green, blue, alpha]
-    elif colormap == "heatmap":
-        # Professional heatmap: Blue -> Cyan -> Yellow -> Red
-        # This provides excellent contrast and is colorblind-friendly
-        colors = np.zeros((len(normalized_conf), 4), dtype=np.uint8)
-        for i, conf in enumerate(normalized_conf):
-            # Invert confidence so low confidence = hot colors (red)
-            # High confidence = cool colors (blue)
-            heat = 1.0 - conf  # 0 = high confidence (blue), 1 = low confidence (red)
-            
-            if heat <= 0.25:  # High confidence: Blue to Cyan
-                ratio = heat / 0.25
-                red = 0
-                green = int(ratio * 255)
-                blue = 255
-            elif heat <= 0.5:  # Medium-high confidence: Cyan to Green  
-                ratio = (heat - 0.25) / 0.25
-                red = 0
-                green = 255
-                blue = int((1 - ratio) * 255)
-            elif heat <= 0.75:  # Medium-low confidence: Green to Yellow
-                ratio = (heat - 0.5) / 0.25
-                red = int(ratio * 255)
-                green = 255
-                blue = 0
-            else:  # Low confidence: Yellow to Red
-                ratio = (heat - 0.75) / 0.25
-                red = 255
-                green = int((1 - ratio) * 255)
-                blue = 0
-            
-            alpha = 255
-            colors[i] = [red, green, blue, alpha]
-    else:
-        # Use matplotlib colormap for other options
-        cmap = cm.get_cmap(colormap)
-        colors = cmap(normalized_conf)
-        # Convert to 0-255 RGBA
-        colors = (colors * 255).astype(np.uint8)
-    
+def confidence_to_colors(confidence: np.ndarray) -> np.ndarray:
+    """Confidence -> RGBA, red (low) to green (high), normalised over the given values."""
+    lo, hi = np.min(confidence), np.max(confidence)
+    norm = (confidence - lo) / (hi - lo) if hi > lo else np.ones_like(confidence)
+    colors = np.zeros((len(norm), 4), dtype=np.uint8)
+    colors[:, 0] = ((1.0 - norm) * 255).astype(np.uint8)
+    colors[:, 1] = (norm * 255).astype(np.uint8)
+    colors[:, 3] = 255
     return colors
-
-
-def create_confidence_colorbar(
-    conf_min: float,
-    conf_max: float, 
-    colormap: str = "coolwarm",
-    height: float = 0.5,
-    width: float = 0.05,
-    position: np.ndarray = np.array([0, 0, 2])
-) -> Optional[trimesh.Trimesh]:
-    """
-    Create a 3D colorbar mesh to show confidence scale.
-    
-    Args:
-        conf_min: Minimum confidence value
-        conf_max: Maximum confidence value
-        colormap: Matplotlib colormap name
-        height: Height of the colorbar
-        width: Width of the colorbar
-        position: 3D position of the colorbar
-        
-    Returns:
-        Trimesh object representing the colorbar, or None if creation fails
-    """
-    try:
-        # Create a rectangular mesh for the colorbar
-        n_segments = 50
-        vertices = []
-        faces = []
-        colors = []
-        
-        for i in range(n_segments):
-            y_bottom = (i / n_segments) * height + position[1]
-            y_top = ((i + 1) / n_segments) * height + position[1]
-            
-            # Create quad vertices
-            quad_vertices = [
-                [position[0], y_bottom, position[2]],           # bottom-left
-                [position[0] + width, y_bottom, position[2]],   # bottom-right
-                [position[0] + width, y_top, position[2]],      # top-right
-                [position[0], y_top, position[2]]               # top-left
-            ]
-            
-            vertex_start = len(vertices)
-            vertices.extend(quad_vertices)
-            
-            # Create two triangles for the quad
-            faces.extend([
-                [vertex_start, vertex_start + 1, vertex_start + 2],
-                [vertex_start, vertex_start + 2, vertex_start + 3]
-            ])
-            
-            # Color based on position
-            conf_value = conf_min + (i / n_segments) * (conf_max - conf_min)
-            normalized_conf = (conf_value - conf_min) / (conf_max - conf_min) if conf_max > conf_min else 0.5
-            
-            cmap = cm.get_cmap(colormap)
-            color = cmap(normalized_conf)
-            color_rgba = (np.array(color) * 255).astype(np.uint8)
-            
-            # Apply same color to all vertices of the quad
-            colors.extend([color_rgba] * 4)
-        
-        # Create mesh
-        colorbar_mesh = trimesh.Trimesh(
-            vertices=np.array(vertices),
-            faces=np.array(faces),
-            vertex_colors=np.array(colors)
-        )
-        
-        return colorbar_mesh
-        
-    except Exception as e:
-        print(f"Warning: Could not create colorbar mesh: {e}")
-        return None
-
-
-def analyze_confidence_distribution(
-    confidence: Union[torch.Tensor, np.ndarray],
-    conf_threshold: float = 0.6
-) -> Dict[str, float]:
-    """
-    Analyze confidence score distribution for map quality assessment.
-    
-    Args:
-        confidence: Confidence scores array
-        conf_threshold: Percentile threshold as decimal (0.0-1.0) for quality assessment
-        
-    Returns:
-        Dictionary with distribution statistics
-    """
-    if isinstance(confidence, torch.Tensor):
-        confidence = confidence.detach().cpu().numpy()
-    
-    # Flatten if multi-dimensional
-    confidence = confidence.flatten()
-    
-    # Filter valid values
-    valid_conf = confidence[np.isfinite(confidence) & (confidence > 0)]
-    
-    if len(valid_conf) == 0:
-        return {
-            "mean": 0.0,
-            "std": 0.0,
-            "min": 0.0,
-            "max": 0.0,
-            "high_conf_ratio": 0.0,
-            "percentile_25": 0.0,
-            "percentile_50": 0.0,
-            "percentile_75": 0.0,
-            "percentile_95": 0.0
-        }
-    
-    # Calculate actual threshold using percentile-based approach
-    if conf_threshold == 0.0:
-        actual_threshold = 0.0
-    else:
-        percentile = conf_threshold * 100
-        actual_threshold = np.percentile(valid_conf, percentile)
-    
-    return {
-        "mean": float(np.mean(valid_conf)),
-        "std": float(np.std(valid_conf)),
-        "min": float(np.min(valid_conf)),
-        "max": float(np.max(valid_conf)),
-        "high_conf_ratio": float(np.sum(valid_conf >= actual_threshold) / len(valid_conf)),
-        "percentile_25": float(np.percentile(valid_conf, 25)),
-        "percentile_50": float(np.percentile(valid_conf, 50)),
-        "percentile_75": float(np.percentile(valid_conf, 75)),
-        "percentile_95": float(np.percentile(valid_conf, 95)),
-        "actual_threshold": float(actual_threshold),
-        "percentile_threshold": float(conf_threshold * 100)
-    }
 
 
 def save_confidence_point_cloud_ply(

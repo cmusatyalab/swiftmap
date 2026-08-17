@@ -88,19 +88,9 @@ class MapData:
     def __len__(self) -> int:
         return len(self.points)
 
-    def filtered(self, percentile) -> "MapData":
-        """A copy keeping only points at/above the ``percentile`` confidence cut."""
-        keep = geometry.confidence_mask(self.conf, percentile)
-        return MapData(self.points[keep], self.colors[keep], self.conf[keep],
-                       self.transform, self.frames)
-
     def to_common_enu(self, origin_lla) -> np.ndarray:
         """This map's points in ENU meters about ``origin_lla``."""
         return self.transform.to_enu(self.points, origin_lla)
-
-    def pointcloud(self):
-        """A trimesh PointCloud of this map."""
-        return geometry.pointcloud(self.points, self.colors)
 
     @staticmethod
     def merge(maps, origin=None, voxel_size: float = 0.1) -> "MapData":
@@ -147,10 +137,6 @@ class Reconstruction(dict):
     @property
     def images(self) -> np.ndarray:
         return np.asarray(self["images"])
-
-    @property
-    def camera_positions(self):
-        return np.asarray(self["camera_positions"]) if "camera_positions" in self else None
 
     @property
     def has_points(self) -> bool:

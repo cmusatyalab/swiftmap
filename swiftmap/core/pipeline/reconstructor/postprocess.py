@@ -27,12 +27,10 @@ from typing import Any, Dict
 import numpy as np
 import torch
 
-from swiftmap.core.pipeline.reconstructor.scene_export import (
-    predictions_to_glb, export_point_cloud_to_ply, save_point_cloud_ply)
+from swiftmap.core.pipeline.reconstructor.scene_export import predictions_to_glb
 
 try:
-    from swiftmap.core.pipeline.reconstructor.confidence_mapping import (
-        generate_confidence_point_cloud, analyze_confidence_distribution)
+    from swiftmap.core.pipeline.reconstructor.confidence_mapping import generate_confidence_point_cloud
     CONFIDENCE_MAPPING_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional viz deps
     CONFIDENCE_MAPPING_AVAILABLE = False
@@ -90,7 +88,7 @@ def _point_conf_keys(predictions: Dict[str, Any]):
 
 def generate_3d_content(predictions: Dict[str, Any],
                         params: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate GLB + point-cloud PLY + predictions.npz into input_stream_{ts}/.
+    """Generate the preview GLB + predictions.npz into the run dir.
 
     Backbone-agnostic: works off the normalized prediction schema. The scene
     exporter itself decides whether to use ``world_points`` or fall back to
@@ -136,33 +134,8 @@ def generate_3d_content(predictions: Dict[str, Any],
         np.savez(prediction_save_path, **predictions_for_save)
         print(f"Predictions saved: {prediction_save_path}")
 
-        ply_filename = os.path.join(
-            target_dir,
-            f"pointcloud_{params['conf_threshold']}_all_maskb{params['mask_black_bg']}"
-            f"_maskw{params['mask_white_bg']}_sky{params['mask_sky']}"
-            f"_dyn{params['mask_dynamic']}.ply")
-        try:
-            vertices_3d, colors_rgb = export_point_cloud_to_ply(
-                predictions,
-                ply_filename,
-                conf_thres=params["conf_threshold"],
-                filter_by_frames="all",
-                mask_black_bg=params["mask_black_bg"],
-                mask_white_bg=params["mask_white_bg"],
-                mask_sky=params["mask_sky"],
-                mask_dynamic=params["mask_dynamic"],
-                target_dir=target_dir,
-                prediction_mode="Pointmap Regression",
-            )
-            save_point_cloud_ply(vertices_3d, colors_rgb, ply_filename)
-            print(f"Point cloud saved: {ply_filename}")
-        except Exception as e:
-            print(f"Warning: PLY export failed: {e}")
-            ply_filename = None
-
         return {
             "glb_path": glb_path if os.path.exists(glb_path) else None,
-            "ply_path": ply_filename if ply_filename and os.path.exists(ply_filename) else None,
             "scene": scene,
             "target_directory": target_dir,
             "images_directory": target_dir_images,
@@ -199,7 +172,6 @@ def generate_confidence_mapping(predictions: Dict[str, Any],
             world_points=world_points,
             confidence=world_points_conf,
             conf_threshold=conf_threshold_normalized,
-            colormap="red_to_green",
             save_ply=True,
             ply_path=target_ply_path,
         )
@@ -211,14 +183,11 @@ def generate_confidence_mapping(predictions: Dict[str, Any],
             scene.export(conf_glb_path)
             print(f"Confidence map GLB saved: {conf_glb_path}")
 
-        distribution_stats = analyze_confidence_distribution(world_points_conf)
-
         results = {
             "scene": scene,
             "glb_path": conf_glb_path if os.path.exists(conf_glb_path) else None,
             "ply_path": target_ply_path if target_ply_path and os.path.exists(target_ply_path) else None,
             "statistics": stats,
-            "distribution": distribution_stats,
             "threshold_used": conf_threshold_normalized,
         }
         print(f"Confidence mapping generated: {stats.get('high_conf_points', 0)}/"
