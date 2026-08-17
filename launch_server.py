@@ -14,7 +14,7 @@ Config is read from env vars (below), overridable by CLI flags:
     SWIFTMAP_PORT            TCP port                  (default 43322)
     SWIFTMAP_BACKBONE        vggt | vggt_omega         (default vggt)
     SWIFTMAP_SEGMENTER       segmentation model        (default sam3)
-    SWIFTMAP_SITE            area-tag prefix           (default area)
+    SWIFTMAP_SITE            site-tag prefix           (default site)
     SWIFTMAP_MAX_KEYFRAMES   cap that triggers a run   (default 70)
     SWIFTMAP_CONF_THRESHOLD  confidence percentile     (default 60)
     SWIFTMAP_MERGE_VOXEL     grow-merge voxel size (m) (default 0.1)
@@ -60,15 +60,15 @@ def main() -> int:
     p.add_argument("--backbone", default=_env("SWIFTMAP_BACKBONE", "vggt"))
     p.add_argument("--segmenter", default=_env("SWIFTMAP_SEGMENTER", "sam3"),
                    help="segmentation model used by the on-demand segment service")
-    p.add_argument("--site", default=_env("SWIFTMAP_SITE", "area"),
-                   help="area-tag prefix (drone / site name)")
+    p.add_argument("--site", default=_env("SWIFTMAP_SITE", "site"),
+                   help="site-tag prefix (drone / site name)")
     p.add_argument("--max-keyframes", type=int,
                    default=int(_env("SWIFTMAP_MAX_KEYFRAMES", constants.DEFAULT_MAX_KEYFRAMES)))
     p.add_argument("--conf-threshold", type=float,
                    default=float(_env("SWIFTMAP_CONF_THRESHOLD", constants.DEFAULT_CONF_THRESHOLD)))
     p.add_argument("--merge-voxel", type=float,
                    default=float(_env("SWIFTMAP_MERGE_VOXEL", 0.1)),
-                   help="voxel size (m) for merging each batch into the growing area")
+                   help="voxel size (m) for merging each batch into the growing site")
     p.add_argument("--mask-sky", type=lambda s: str(s).lower() in ("1", "true", "yes", "on"),
                    default=_env_bool("SWIFTMAP_MASK_SKY", True))
     p.add_argument("--keep-all", action="store_true", default=_env_bool("SWIFTMAP_KEEP_ALL", False))

@@ -4,20 +4,20 @@
 
 A long-lived ``MappingSession`` collects frame+GPS pairs over TCP. A background
 monitor watches the retained keyframe count; once it reaches the cap, the server
-reconstructs that batch and **merges it into a single growing** ``Map``:
+reconstructs that batch and **merges it into the growing** ``Site``:
 
     reconstruct (VGGT / VGGT-Omega) -> GPS-align -> NFN plan
-      -> merge the batch into the current growing map (GPS co-registration,
-         origin pinned so coordinates never drift, near-duplicate points collapsed)
-      -> write the merged map (Map.write), inherit the old map's segmentation,
-         and delete the old + batch dirs.
+      -> store the batch as a map under ``maps/``
+      -> grow the site with it (GPS co-registration, origin pinned so coordinates
+         never drift, near-duplicate points collapsed).
 
-There is one *current* ``Map`` at a time. On startup the server resumes the latest
-existing map (or the operator selects one via ``set_growing_map``); with none, the
-first batch creates it. Segmentation is request-driven and carried forward on merge.
+The database root holds ``maps/`` (every generated map, kept and individually
+segmentable) and ``site/`` (the one growing map, the merge of them all). On startup the
+server resumes the existing site. Segmentation is request-driven; the site keeps its own
+artifacts as it grows.
 
 Everything is written under the process working directory; pointing the container's
-working dir at a mounted volume puts the growing map on the host.
+working dir at a mounted volume puts the site on the host.
 """
 
 import os
@@ -30,8 +30,7 @@ from typing import List, Optional
 
 from swiftmap.core import constants
 from swiftmap.core.transport import protocol
-from swiftmap.core.database import Map
-from swiftmap.core.primitives.types import MapData
+from swiftmap.core.database import Database
 from swiftmap.core.session import MappingSession
 
 
@@ -56,7 +55,7 @@ class ServerConfig:
 
 
 class AutoMappingServer:
-    """Collects keyframes over TCP and grows one merged ``Map`` at the cap."""
+    """Collects keyframes over TCP; at the cap, stores the batch and grows the ``Site``."""
 
     _STAGING = "_staging"
 
@@ -78,15 +77,10 @@ class AutoMappingServer:
         self._run_idx = 0
         self._stop = threading.Event()
 
-        self._current: Optional[Map] = None
-        self._init_current_map()
-
-    def _init_current_map(self):
-        """Resume growth of the latest existing map on disk, if any."""
-        existing = Map.list(self._root)
-        if existing:
-            self._current = existing[0]
-            print(f"[swiftmap-server] resuming growth of existing map '{self._current.tag}'")
+        self.db = Database(self._root, config.site)
+        if self.db.site.exists():
+            print(f"[swiftmap-server] resuming growth of site '{self.db.site.name}' "
+                  f"({len(self.db.maps())} map(s) stored)")
 
     def run(self):
         """Start collecting and block, growing the map whenever the cap fills."""
@@ -94,7 +88,8 @@ class AutoMappingServer:
         print(f"[swiftmap-server] site={self.cfg.site} backbone={self.cfg.backbone} "
               f"segmenter={self.cfg.segmenter} cap={self.cfg.max_keyframes} "
               f"merge_voxel={self.cfg.merge_voxel} m")
-        print(f"[swiftmap-server] maps -> {self._root}")
+        print(f"[swiftmap-server] maps -> {self.db.maps_dir}")
+        print(f"[swiftmap-server] site -> {self.db.site.path}")
 
         if not self.session.start(port=self.cfg.port, keep_all=self.cfg.keep_all):
             raise RuntimeError("Failed to start the TCP collection server")
@@ -186,35 +181,25 @@ class AutoMappingServer:
             self.session.export_nfn_plan()
             self._send_nfn_kml(target_dir)
 
-            batch = Map(target_dir)
-            old = self._current if (self._current and self._current.exists()) else None
-            tag = Map.tag_for(self.cfg.site, created)
-            if old:
-                # grow the current map with this batch (co-register, merge, inherit, cleanup)
-                new = old.merge(batch, conf_thres=self.cfg.conf_threshold,
-                                voxel_size=self.cfg.merge_voxel, site=self.cfg.site,
-                                tag=tag, created=created)
-                print(f"[swiftmap-server] grew '{new.tag}', removed old map '{old.tag}'")
-            else:
-                # first map: normalize the batch into the store (single-map merge)
-                merged = MapData.merge([batch.load(self.cfg.conf_threshold)],
-                                       voxel_size=self.cfg.merge_voxel)
-                new = Map.write(merged, self._root, self.cfg.site, ["batch"], tag=tag,
-                                created=created, voxel_size=self.cfg.merge_voxel)
-            self._current = new
-            n_points = int(new.metadata.get("num_points", 0))
-            n_cameras = len(new.frames)
+            # Store this batch as a map under maps/, then grow the site with it.
+            grew = self.db.site.exists()
+            stored = self.db.store(target_dir, created)
+            self.db.grow(stored, conf_thres=self.cfg.conf_threshold,
+                         voxel_size=self.cfg.merge_voxel, created=created)
+            n_points = int(self.db.site.metadata.get("num_points", 0))
+            n_cameras = len(self.db.site.frames)
 
             self.latest_run = {
-                "run": run, "map_tag": new.tag, "target_dir": new.path,
+                "run": run, "map_tag": self.db.site.tag, "target_dir": self.db.site.path,
+                "batch_tag": stored.tag,
                 "num_keyframes": n_cameras,
                 "num_points": n_points,
                 "num_viewpoints": plan.get("num_viewpoints", 0) if isinstance(plan, dict) else 0,
                 "gps_aligned": True, "elapsed": time.time() - t0,
-                "grew": bool(old),
+                "grew": grew,
             }
-            print(f"[swiftmap-server] run #{run}: {'grew' if old else 'created'} map "
-                  f"'{new.tag}' -> {n_points:,} pts, {n_cameras} cameras "
+            print(f"[swiftmap-server] run #{run}: {'grew' if grew else 'created'} site "
+                  f"from '{stored.tag}' -> {n_points:,} pts, {n_cameras} cameras "
                   f"in {time.time() - t0:.1f}s")
 
         except Exception as e:
@@ -251,16 +236,6 @@ class AutoMappingServer:
         print(f"[swiftmap-server] cleared {n} collected keyframe(s)")
         return {"success": True, "cleared": int(n)}
 
-    def set_growing_map(self, map_tag: str) -> dict:
-        """Point the grow loop at an existing map (the operator's chosen target)."""
-        a = Map.get(self._root, map_tag)
-        if a is None:
-            return {"error": f"Unknown map '{map_tag}'."}
-        with self._lock:
-            self._current = a
-        print(f"[swiftmap-server] growing target set to '{map_tag}'")
-        return {"success": True, "map_tag": map_tag}
-
     def _start_viewer(self):
         """Launch the passive Gradio results viewer (non-blocking); headless if it fails."""
         try:
@@ -277,30 +252,31 @@ class AutoMappingServer:
         state["processing"] = self._processing
         state["keyframes"] = self.session.get_keyframe_count()
         state["cap"] = self.cfg.max_keyframes
-        state["current_map"] = self._current.tag if self._current else None
+        state["current_map"] = self.db.site.tag if self.db.site.exists() else None
+        state["num_maps"] = len(self.db.maps())
         return state
 
     def list_map_tags(self) -> List[str]:
-        """Map tags available (newest first)."""
-        return [a.tag for a in Map.list(self._root)]
+        """Selectable tags: the site first, then every stored map (newest first)."""
+        return self.db.tags()
 
     def current_map_tag(self) -> Optional[str]:
-        """The map currently being grown (the merge target)."""
-        return self._current.tag if self._current else None
+        """The map being grown -- always the site."""
+        return self.db.site.tag if self.db.site.exists() else None
 
     def latest_map_tag(self) -> Optional[str]:
-        if self._current:
-            return self._current.tag
         tags = self.list_map_tags()
         return tags[0] if tags else None
+
+    def latest_token(self) -> Optional[str]:
+        """Change token for the viewer: bumps whenever the site grows."""
+        tag = self.latest_map_tag()
+        return None if tag is None else f"{tag}#{self.latest_run.get('run', 0)}"
 
     def render_map(self, map_tag: str, conf_level: float) -> dict:
         """Reconstruction + confidence-at-``conf_level`` GLBs for a stored map."""
         with self._lock:
-            a = Map.get(self._root, map_tag)
-            if a is None:
-                return {"error": f"Unknown map '{map_tag}'."}
-            return a.render(conf_level)
+            return self.db.render_map(map_tag, conf_level)
 
     def segment_map(self, map_tag: str, query: str, conf_level: float = None) -> dict:
         """Segment ``query`` on a stored ``map_tag`` at ``conf_level`` (request-driven).
@@ -310,10 +286,7 @@ class AutoMappingServer:
         """
         conf = self.cfg.conf_threshold if conf_level is None else float(conf_level)
         with self._lock:
-            a = Map.get(self._root, map_tag)
-            if a is None:
-                return {"error": f"Unknown map '{map_tag}'."}
-            res = a.segment(query, self.session.segmenter, conf)
+            res = self.db.segment_map(map_tag, query, self.session.segmenter, conf)
         glb = res.get("glb_path")
         if glb and not os.path.isabs(glb):
             res["glb_path"] = os.path.abspath(glb)

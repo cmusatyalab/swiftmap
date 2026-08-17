@@ -17,13 +17,13 @@ The server replies:
     [ 4-byte   big-endian uint32          payload length (0 when none)         ]
     [ <payload length> bytes              optional payload (e.g. an NFN KML)    ]
 
-The status header is native-endian (``"3d"``) for backward compatibility with existing
-clients; the size/GPS/payload-length fields are big-endian. The trailing payload is
-always length-prefixed (length 0 for an ordinary per-frame ack) so every reader can
-consume the whole reply; the server uses it to hand a freshly planned NFN area KML
-back to the engine. All current peers are same-architecture, so this is consistent on
-the wire — keep the reply format in lockstep across the server, ``test_client``, and
-the SteelEagle engine if it is ever changed.
+The status header is native-endian (``"3d"``); the size/GPS/payload-length fields are
+big-endian. All peers are same-architecture, so the reply is consistent on the wire, and
+the SteelEagle engine mirrors this exact format. The trailing payload is always
+length-prefixed (length 0 for an ordinary per-frame ack) so every reader can consume the
+whole reply; the server uses it to hand a freshly planned NFN area KML back to the engine.
+Keep the reply format in lockstep across the server, ``test_client``, and the SteelEagle
+engine if it is ever changed.
 """
 
 import struct
@@ -34,7 +34,7 @@ TCP_PORT = 43322
 # Wire formats.
 SIZE_FORMAT = "!I"    # 4-byte big-endian unsigned image-size header
 GPS_FORMAT = "!3d"    # 3x big-endian float64: lat, lon, alt
-REPLY_FORMAT = "3d"   # 3x native-endian float64: status, kf_count, total (legacy)
+REPLY_FORMAT = "3d"   # 3x native-endian float64: status, kf_count, total
 PAYLOAD_LEN_FORMAT = "!I"  # 4-byte big-endian length of the trailing reply payload
 
 SIZE_NBYTES = struct.calcsize(SIZE_FORMAT)    # 4
