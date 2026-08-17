@@ -70,12 +70,12 @@ class Database:
     def render_map(self, tag: str, conf_level: float) -> dict:
         """Render the site or a stored map: GLB views at ``conf_level`` in its dir."""
         m = self.get(tag)
-        return artifacts.render(m, conf_level) if m else {"error": f"Unknown map '{tag}'."}
+        return utils.render(m, conf_level) if m else {"error": f"Unknown map '{tag}'."}
 
     def segment_map(self, tag: str, query: str, segmenter, conf_threshold: float = 60.0) -> dict:
         """Segment ``query`` on the site or a stored map, writing results in its dir."""
         m = self.get(tag)
-        return artifacts.segment(m, query, segmenter, conf_threshold) if m \
+        return utils.segment(m, query, segmenter, conf_threshold) if m \
             else {"error": f"Unknown map '{tag}'."}
 
     def delete(self, tag: str) -> bool:

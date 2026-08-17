@@ -4,7 +4,7 @@
 
 Holds a raw ``predictions.npz`` (a reconstructed batch) or a merged ``merged_points.npz``
 plus transform/camera/map json. It is the store record -- identity, metadata, ``load``
-(-> MapData) and ``write`` (MapData -> dir); derived files come from ``artifacts``."""
+(-> MapData) and ``write`` (MapData -> dir); derived files come from ``utils``."""
 
 import glob
 import json
