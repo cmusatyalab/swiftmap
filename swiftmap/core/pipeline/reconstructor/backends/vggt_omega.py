@@ -1,19 +1,6 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""VGGT-Omega backbone adapter.
-
-Wraps VGGT-Omega behind ``BaseReconstructor``. Unlike VGGT, Omega:
-  * loads from a local checkpoint (.pt) via ``torch.load`` + ``load_state_dict``
-    (no hub URL) — see ``constants.VGGT_OMEGA_CHECKPOINT``;
-  * preprocesses at a configurable ``image_resolution`` (patch size 16);
-  * decodes pose with ``encoding_to_camera`` (not ``pose_encoding_to_extri_intri``);
-  * predicts depth only (no point head), so world points are recovered by
-    unprojecting depth (``_unproject_depth_map_to_point_map``, below) into
-    ``world_points_from_depth``.
-
-The ``vggt_omega`` package (import name ``vggt_omega``, distinct from ``vggt``)
-is imported lazily so it is only loaded when this backbone is selected.
-"""
+"""VGGT-Omega backbone adapter."""
 
 from datetime import datetime
 from typing import Any, Dict, List
@@ -25,6 +12,7 @@ from swiftmap.core import constants
 from swiftmap.core.pipeline.reconstructor.base import BaseReconstructor
 from swiftmap.core.pipeline.reconstructor.pose import camera_poses_from_extrinsics
 from swiftmap.core.pipeline.reconstructor.registry import register_reconstructor
+from swiftmap.database.types import PointCloud
 
 
 def _unproject_depth_map_to_point_map(depth_map: np.ndarray,
@@ -105,7 +93,7 @@ class VGGTOmegaReconstructor(BaseReconstructor):
 
     def _decode_predictions(self, predictions: Dict[str, torch.Tensor],
                             images: torch.Tensor,
-                            keyframe_paths: List[str]) -> Dict[str, Any]:
+                            keyframe_paths: List[str]) -> PointCloud:
         from vggt_omega.utils.pose_enc import encoding_to_camera
 
         image_hw = predictions["images"].shape[-2:] if "images" in predictions else images.shape[-2:]
@@ -122,21 +110,24 @@ class VGGTOmegaReconstructor(BaseReconstructor):
             else:
                 processed[key] = value
 
-        # Omega has no point head: unproject depth into the standard world_points keys.
-        world_points = _unproject_depth_map_to_point_map(
+        # Omega has no point head: unproject depth into world_points_from_depth;
+        # PointCloud.points_and_conf() falls back to it when world_points is unset.
+        world_points_from_depth = _unproject_depth_map_to_point_map(
             processed["depth"], processed["extrinsic"], processed["intrinsic"])
-        processed["world_points_from_depth"] = world_points
-        processed["world_points"] = world_points
-        if "depth_conf" in processed:
-            processed["world_points_conf"] = processed["depth_conf"]
 
         positions, rotations = camera_poses_from_extrinsics(processed["extrinsic"])
-        processed["camera_positions"] = positions
-        processed["camera_rotations"] = rotations
-        processed["metadata"] = {
-            "keyframe_paths": keyframe_paths,
-            "num_keyframes": len(keyframe_paths),
-            "processing_timestamp": datetime.now(),
-            "input_image_shape": images.shape,
-        }
-        return processed
+        return PointCloud(
+            world_points_from_depth=world_points_from_depth,
+            depth_conf=processed.get("depth_conf"),
+            images=processed.get("images"),
+            extrinsic=processed["extrinsic"],
+            intrinsic=processed["intrinsic"],
+            camera_positions=positions,
+            camera_rotations=rotations,
+            metadata={
+                "keyframe_paths": keyframe_paths,
+                "num_keyframes": len(keyframe_paths),
+                "processing_timestamp": datetime.now(),
+                "input_image_shape": images.shape,
+            },
+        )

@@ -1,12 +1,6 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""VGGT backbone adapter.
-
-Wraps facebook/VGGT-1B behind ``BaseReconstructor``. VGGT predicts world points
-directly (dedicated point head) and encodes camera pose as ``pose_enc`` decoded
-with ``pose_encoding_to_extri_intri``. The heavy ``vggt`` package is imported
-lazily inside methods so selecting a different backbone never imports it.
-"""
+"""VGGT backbone adapter."""
 
 from datetime import datetime
 from typing import Any, Dict, List
@@ -18,6 +12,7 @@ from swiftmap.core import constants
 from swiftmap.core.pipeline.reconstructor.base import BaseReconstructor
 from swiftmap.core.pipeline.reconstructor.pose import camera_poses_from_extrinsics
 from swiftmap.core.pipeline.reconstructor.registry import register_reconstructor
+from swiftmap.database.types import PointCloud
 
 
 @register_reconstructor(
@@ -57,7 +52,7 @@ class VGGTReconstructor(BaseReconstructor):
 
     def _decode_predictions(self, predictions: Dict[str, torch.Tensor],
                             images: torch.Tensor,
-                            keyframe_paths: List[str]) -> Dict[str, Any]:
+                            keyframe_paths: List[str]) -> PointCloud:
         from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
         extrinsic, intrinsic = pose_encoding_to_extri_intri(
@@ -73,12 +68,20 @@ class VGGTReconstructor(BaseReconstructor):
                 processed[key] = value
 
         positions, rotations = camera_poses_from_extrinsics(processed["extrinsic"])
-        processed["camera_positions"] = positions
-        processed["camera_rotations"] = rotations
-        processed["metadata"] = {
-            "keyframe_paths": keyframe_paths,
-            "num_keyframes": len(keyframe_paths),
-            "processing_timestamp": datetime.now(),
-            "input_image_shape": images.shape,
-        }
-        return processed
+        return PointCloud(
+            world_points=processed.get("world_points"),
+            world_points_conf=processed.get("world_points_conf"),
+            world_points_from_depth=processed.get("world_points_from_depth"),
+            depth_conf=processed.get("depth_conf"),
+            images=processed.get("images"),
+            extrinsic=processed["extrinsic"],
+            intrinsic=processed["intrinsic"],
+            camera_positions=positions,
+            camera_rotations=rotations,
+            metadata={
+                "keyframe_paths": keyframe_paths,
+                "num_keyframes": len(keyframe_paths),
+                "processing_timestamp": datetime.now(),
+                "input_image_shape": images.shape,
+            },
+        )

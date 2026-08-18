@@ -14,8 +14,8 @@ import os
 from datetime import datetime
 from typing import List, Optional
 
-from swiftmap.core.database.map import Map
-from swiftmap.core.database.site import Site
+from swiftmap.database.map import Map
+from swiftmap.database.site import Site
 
 MAPS_DIRNAME = "maps"
 SITE_DIRNAME = "site"
@@ -24,17 +24,32 @@ SITE_DIRNAME = "site"
 class Database:
     """The result dir: every stored map under ``maps/``, plus the growing ``site/``."""
 
+    def __init__(self, root: str, site: str):
+        self.root = root
+        self.site_name = site
+        self.maps_dir = os.path.join(root, MAPS_DIRNAME)
+        self.site_dir = os.path.join(root, SITE_DIRNAME)
+        os.makedirs(self.maps_dir, exist_ok=True)
+        self.site = Site()
+
     def get_maps(self) -> List[Map]:
         """Stored maps, newest first."""
 
     def get_site(self) -> Site:
         """The growing site map (tag ``site``)."""
+        return self.site
 
     def create_site(self, created: datetime = None) -> Site:
         """Create the site map under ``site/`` for the first time."""
 
-    def create_map(self, created: datetime = None) -> Map:
+    def create_map(self, created: datetime = None,
+                   keyframe_paths: Optional[List[str]] = None) -> Map:
         """Create an empty map under ``maps/`` for a run to write into."""
+        created = created or datetime.now()
+        tag = f"map_{created.strftime('%Y%m%d_%H%M%S_%f')}"
+        path = os.path.join(self.maps_dir, tag)
+        os.makedirs(path, exist_ok=True)
+        return Map(name=tag, path=path, keyframe_paths=keyframe_paths)
 
     def grow_site(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
                   created: datetime = None) -> Site:

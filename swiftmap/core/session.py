@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from swiftmap.core import constants
-from swiftmap.core.database import Database
+from swiftmap.database import Database
 from swiftmap.core.transport import protocol
 from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.transport.tcp_server import MappingTCPServer
@@ -127,14 +127,7 @@ class MappingSession:
                 if not result.get("success"):
                     print(f"Reconstruction failed: {result.get('error')}")
                     continue
-
-                cfg = self.align_gps()
-                if "error" in cfg:
-                    print(f"GPS align failed: {cfg['error']}")
-
-                plan = self.plan()
-                if "error" in plan:
-                    print(f"NFN failed: {plan['error']}")
+                # TODO: deferred -- align_gps()/plan() don't exist on MappingSession yet.
             finally:
                 self.tcp_server.release_batch(batch)
 
@@ -155,7 +148,8 @@ class MappingSession:
             return {"success": False, "error": "No keyframes collected yet",
                     "keyframe_count": 0}
         print(f"Reconstructing {len(paths)} keyframes (batch_size={self.batch_size})")
-        return self.reconstructor.run(paths, params)
+        map_ = self.db.create_map(keyframe_paths=paths)
+        return self.reconstructor.run(map_, params)
     # ---------------------------------------------------------------- planning
 
     # ------------------------------------------------------------ GPS alignment

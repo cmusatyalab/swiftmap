@@ -1,15 +1,8 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""Backbone-agnostic post-processing: scene.glb, confidence_map.glb, camera_poses.json.
-
-Public API: ``generate_3d_scene``, ``generate_confidence_scene``, ``generate_camera_poses``
-(used by ``BaseReconstructor``). Everything else here is a private helper. Extrinsics ->
-world-pose math lives in ``pipeline.reconstructor.pose`` (shared with the backend
-adapters, which need it independently of this module).
-"""
+"""Builds scene.glb / confidence_map.glb / camera_poses.json content; Map.write2disk() exports it."""
 
 import copy
-import json
 import os
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -18,66 +11,50 @@ import numpy as np
 import trimesh
 
 from swiftmap.core import constants
-from swiftmap.core.database import cloud as arrays
-from swiftmap.core.pipeline import utils as pipeline_utils
+from swiftmap.database.map import Map
+from swiftmap.database.types import PointCloud
 from swiftmap.core.pipeline.reconstructor.pose import camera_poses_from_extrinsics
 
-_SKY_MASK_THRESHOLD = 0.1   # skyseg value above this counts as sky (zeroed)
-_MAX_CONFIDENCE_POINTS = 50000  # subsample cap for the confidence scene
+_SKY_MASK_THRESHOLD = 0.1
+_MAX_CONFIDENCE_POINTS = 50000
+_CONF_EPSILON = 1e-6
 
 
-# =================================================================== generate_3d_scene
-def generate_3d_scene(predictions: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate scene.glb, the run's preview scene, into the run dir."""
+def generate_3d_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the confidence-filtered preview scene and attach it as pt.scene."""
     try:
         print("Generating 3D content...")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        target_dir = params.get("output_name") or f"input_stream_{timestamp}"
-        os.makedirs(target_dir, exist_ok=True)
+        pt = map.get_pointcloud()
+        pts, conf = pt.world_points, pt.world_points_confs
 
-        scene = _preview_scene(predictions, params, target_dir)
-        glb_path = os.path.join(target_dir, "scene.glb")
-        scene.export(glb_path)
-        print(f"GLB scene generated: {glb_path}")
-        return {"glb_path": glb_path, "scene": scene, "target_directory": target_dir}
+        if params.get("mask_sky"):
+            conf = _apply_sky_mask(map)
+        xyz, conf, keep = _flatten_valid(params["conf_threshold"], pt, conf=conf)
+        xyz, conf = xyz[keep], conf[keep]
+        cols = pt.flatten_colors()[keep]
+
+        frames = []
+        if params.get("show_cam") and pt.extrinsic is not None:
+            positions, rotations = camera_poses_from_extrinsics(pt.extrinsic)
+            frames = [{"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()}
+                     for p, R in zip(positions, rotations)]
+
+        scene = trimesh.Scene()
+        geometry = trimesh.PointCloud(vertices=xyz, colors=cols)
+        scene.add_geometry(geometry, geom_name="points")
+        if frames and len(xyz):
+            size = float(np.clip(np.linalg.norm(xyz.max(0) - xyz.min(0)) * 0.01, 1.0, 5.0))
+            scene.add_geometry(_camera_frustums(frames, size, (20, 20, 20, 255)), geom_name="cameras")
+        pt.scene = scene
+
+        print(f"3D scene generated: {len(xyz)} points")
+        return {"success": True}
     except Exception as e:
         print(f"Error generating 3D content: {e}")
         return {"error": str(e)}
 
-
-def _preview_scene(predictions, params, target_dir):
-    """Confidence-filtered cloud + camera frustums, in local coords."""
-    pts, conf = _point_conf_keys(predictions)
-    if params.get("mask_sky"):
-        conf = _apply_sky_mask(np.array(conf, dtype=float), target_dir)
-    xyz, _, keep = _flatten_valid(pts, conf, params["conf_threshold"])
-    cols = arrays.flatten_colors(predictions["images"])
-
-    frames = []
-    if params.get("show_cam") and "extrinsic" in predictions:
-        positions, rotations = camera_poses_from_extrinsics(predictions["extrinsic"])
-        frames = [{"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()}
-                  for p, R in zip(positions, rotations)]
-    return _pointcloud_scene(xyz[keep], cols[keep], frames)
-
-
-def _pointcloud_scene(points, colors, frames=None,
-                      frustum_rgba=(20, 20, 20, 255), frustum_scale: float = 0.01):
-    """trimesh.Scene of a point cloud plus optional camera frustums, in the world frame.
-
-    Frustum size scales with the cloud's diagonal (clamped to [1, 5] m).
-    """
-    points = np.asarray(points)
-    scene = trimesh.Scene()
-    scene.add_geometry(pipeline_utils.pointcloud(points, colors), geom_name="points")
-    if frames and len(points):
-        size = float(np.clip(np.linalg.norm(points.max(0) - points.min(0)) * frustum_scale, 1.0, 5.0))
-        scene.add_geometry(_camera_frustums(frames, size, frustum_rgba), geom_name="cameras")
-    return scene
-
-
 def _camera_frustums(frames, size: float, rgba):
-    """One Trimesh of camera-frustum pyramids for ``frames`` (in their coordinate frame)."""
+    """One Trimesh of camera-frustum pyramids for frames."""
     corners = np.array([[-0.5, -0.375, 1.0], [0.5, -0.375, 1.0],
                         [0.5, 0.375, 1.0], [-0.5, 0.375, 1.0]])
     verts = np.zeros((len(frames) * 5, 3))
@@ -96,17 +73,16 @@ def _camera_frustums(frames, size: float, rgba):
     return mesh
 
 
-# ============================================================ generate_confidence_scene
-def generate_confidence_scene(predictions: Dict[str, Any], params: Dict[str, Any],
-                              target_dir: str) -> Dict[str, Any]:
-    """Generate confidence_map.glb, the map-quality point cloud, for NFN visualization."""
+def generate_confidence_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the map-quality confidence point cloud and attach it as pt.confidence_scene."""
     try:
         print("Generating confidence mapping...")
-        pts, conf = _point_conf_keys(predictions)
+        pt = map.get_pointcloud()
+        pts, conf = pt.world_points, pt.world_points_confs
         if pts is None:
             return {"error": "No world points or depth available in predictions"}
 
-        xyz, conf, keep = _flatten_valid(pts, conf, params["conf_threshold"])
+        xyz, conf, keep = _flatten_valid(params["conf_threshold"], pt)
         xyz, conf = xyz[keep], conf[keep]
         stats = {
             "total_points": int(keep.size),
@@ -115,32 +91,32 @@ def generate_confidence_scene(predictions: Dict[str, Any], params: Dict[str, Any
             "mean_confidence": float(np.mean(conf)) if len(conf) else 0.0,
             "confidence_std": float(np.std(conf)) if len(conf) else 0.0,
         }
+        pt.confidence_stats = stats
         if len(xyz) == 0:
-            return {"scene": None, "glb_path": None, "statistics": stats}
+            pt.confidence_scene = None
+            return {"statistics": stats}
 
         if len(xyz) > _MAX_CONFIDENCE_POINTS:
             idx = np.random.choice(len(xyz), _MAX_CONFIDENCE_POINTS, replace=False)
             xyz, conf = xyz[idx], conf[idx]
 
         xyz = xyz.copy()
-        xyz[:, 1:] *= -1  # flip Y/Z so the cloud is right-side up in the viewer
+        xyz[:, 1:] *= -1
         scene = trimesh.Scene()
         scene.add_geometry(trimesh.points.PointCloud(vertices=xyz, colors=_confidence_to_colors(conf)),
                           node_name="confidence_points")
+        pt.confidence_scene = scene
 
-        glb_path = os.path.join(target_dir, "confidence_map.glb")
-        scene.export(glb_path)
-        print(f"Confidence map GLB saved: {glb_path}")
         print(f"Confidence mapping generated: {stats['high_conf_points']}/{stats['total_points']} "
               f"high-confidence points")
-        return {"scene": scene, "glb_path": glb_path, "statistics": stats}
+        return {"statistics": stats}
     except Exception as e:
         print(f"Error generating confidence mapping: {e}")
         return {"error": str(e)}
 
 
 def _confidence_to_colors(confidence: np.ndarray) -> np.ndarray:
-    """Confidence -> RGBA, red (low) to green (high), normalised over the given values."""
+    """Confidence -> RGBA, red (low) to green (high)."""
     lo, hi = np.min(confidence), np.max(confidence)
     norm = (confidence - lo) / (hi - lo) if hi > lo else np.ones_like(confidence)
     colors = np.zeros((len(norm), 4), dtype=np.uint8)
@@ -150,21 +126,21 @@ def _confidence_to_colors(confidence: np.ndarray) -> np.ndarray:
     return colors
 
 
-# =============================================================== generate_camera_poses
-def generate_camera_poses(predictions: Dict[str, Any], target_dir: str,
-                          backbone: str) -> Optional[str]:
-    """Write camera_poses.json (per-keyframe pose + intrinsics) into the run dir."""
-    if "extrinsic" not in predictions or "intrinsic" not in predictions:
+def generate_camera_poses(map: Map, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build the camera_poses.json payload and attach it as pt.camera_poses."""
+    pt = map.get_pointcloud()
+    if pt is None or pt.extrinsic is None or pt.intrinsic is None:
         return None
-    extrinsic = np.asarray(predictions["extrinsic"])
-    intrinsic = np.asarray(predictions["intrinsic"])
-    keyframe_paths = predictions.get("metadata", {}).get("keyframe_paths", [])
+
+    extrinsic = np.asarray(pt.extrinsic)
+    intrinsic = np.asarray(pt.intrinsic)
+    keyframe_paths = map.get_keyframe_paths()
     positions, rotations = camera_poses_from_extrinsics(extrinsic)
 
     poses_data = {
         "metadata": {
             "description": "Camera poses from SwiftMap Mapping",
-            "backbone": backbone,
+            "backbone": params.get("backbone"),
             "timestamp": datetime.now().isoformat(),
             "num_keyframes": len(extrinsic),
         },
@@ -182,43 +158,30 @@ def generate_camera_poses(predictions: Dict[str, Any], target_dir: str,
             "extrinsic_matrix": ext.tolist(),
         })
 
-    poses_path = os.path.join(target_dir, "camera_poses.json")
-    with open(poses_path, "w") as f:
-        json.dump(poses_data, f, indent=2)
-    print(f"Camera poses saved: {poses_path}")
-    return poses_path
+    pt.camera_poses = poses_data
+    return poses_data
 
 
-# ============================================================================ shared
-def _point_conf_keys(predictions: Dict[str, Any]):
-    """Pick the (points, confidence) key pair present for this backbone.
-
-    Prefers a dedicated point head (``world_points``); falls back to points
-    unprojected from depth (``world_points_from_depth`` + ``depth_conf``).
-    """
-    if "world_points" in predictions:
-        pts = predictions["world_points"]
-        return pts, predictions.get("world_points_conf", np.ones(pts.shape[:-1]))
-    if "world_points_from_depth" in predictions:
-        pts = predictions["world_points_from_depth"]
-        return pts, predictions.get("depth_conf", np.ones(pts.shape[:-1]))
-    return None, None
-
-
-def _flatten_valid(pts, conf, percentile: float):
-    """Flatten (..., 3)/(...) point+confidence arrays; mask to finite points at/above
-    ``percentile`` confidence. Shared by the 3D scene and the confidence scene."""
-    xyz = np.asarray(pts).reshape(-1, 3)
+def _flatten_valid(percentile: float, pt: PointCloud, conf=None):
+    """Flatten points/conf and mask to finite points at/above the confidence percentile."""
+    xyz = np.asarray(pt.world_points).reshape(-1, 3)
+    if conf is None:
+        conf = pt.world_points_conf
     conf = np.asarray(conf, dtype=float).reshape(-1)
-    keep = np.isfinite(xyz).all(1) & arrays.confidence_mask(conf, percentile)
+
+    keep = np.isfinite(xyz).all(1) & (conf > _CONF_EPSILON)
+    if percentile:
+        thr = np.percentile(conf, float(percentile))
+        keep &= conf >= thr
     return xyz, conf, keep
 
 
-def _apply_sky_mask(conf, target_dir):
-    """Zero confidence on sky pixels for each frame (skyseg.onnx). No-op if ``target_dir``
-    is None or has no saved images to segment."""
-    if target_dir is None:
-        return conf
+def _apply_sky_mask(map: Map) -> np.ndarray:
+    """Zero confidence on sky pixels for each frame (skyseg.onnx)."""
+    pt = map.get_pointcloud()
+    conf = np.array(pt.world_points_conf, dtype=float)
+    target_dir = map.path
+
     import cv2
     import onnxruntime
 
@@ -253,12 +216,12 @@ def _apply_sky_mask(conf, target_dir):
 
 
 def _segment_sky(image_path, session, mask_path) -> np.ndarray:
-    """Binary mask (255 = non-sky) for one image; also written to ``mask_path``."""
+    """Binary mask (255 = non-sky) for one image; also written to mask_path."""
     import cv2
     image = cv2.imread(image_path)
     result = cv2.resize(_run_skyseg(session, (320, 320), image), (image.shape[1], image.shape[0]))
     out = np.zeros_like(result)
-    out[result < 32] = 255  # model emits low values for sky
+    out[result < 32] = 255
     os.makedirs(os.path.dirname(mask_path), exist_ok=True)
     cv2.imwrite(mask_path, out)
     return out
@@ -277,7 +240,7 @@ def _run_skyseg(session, input_size, image) -> np.ndarray:
 
 
 def _download_skyseg(url, filename):
-    """Download ``url`` to ``filename``, following a single redirect."""
+    """Download url to filename, following a single redirect."""
     import requests
     response = requests.get(url, allow_redirects=False)
     response.raise_for_status()

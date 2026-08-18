@@ -6,26 +6,32 @@ import glob
 import os
 from datetime import datetime
 
-from swiftmap.core.database.map import Map
+from swiftmap.database.map import Map
+from swiftmap.database.types import Georeference
 import numpy as np
 import pymap3d
 
-from swiftmap.core.database.georeference import Georeference
 
 
-class Site(Map):
-    """A ``Map`` that grows: each stored map is merged into it, in place."""
+class Site():
+    maps: list[Map]
+    overall_map : Map
+    
+    def __init__(self):
+        self.maps = []
+        self.overall_map = None
 
-    def grow(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
-             created: datetime = None) -> "Site":
-        """Merge ``new_map`` into the site (origin pinned to the site) and rewrite its data."""
+    def grow( self, new_map: Map, merge_params):
+        self.maps.append(new_map)
+        self.overall_map = _merge(self.maps, merge_params)
+
 
 
 
 
 # ------------------------------------------------------------------- merge
 
-def voxel_merge(points, colors, conf, voxel_size: float):
+def _voxel_merge(points, colors, conf, voxel_size: float):
     """Collapse points sharing a ``voxel_size`` grid cell into one, confidence-weighted.
 
     Position and color become the confidence-weighted mean of the cell; the merged
@@ -99,7 +105,7 @@ def _merge(parts, origin=None, voxel_size: float = 0.1):
         cols.append(np.asarray(c))
         conf.append(np.asarray(cf, dtype=float))
         frames += _transform_frames(frs, gt, origin)
-    mpts, mcols, mconf = voxel_merge(np.vstack(pts), np.vstack(cols),
+    mpts, mcols, mconf = _voxel_merge(np.vstack(pts), np.vstack(cols),
                                      np.concatenate(conf), voxel_size)
     identity = Georeference({"scale": 1.0, "rotation": np.eye(3).tolist(),
                              "translation": [0.0, 0.0, 0.0],

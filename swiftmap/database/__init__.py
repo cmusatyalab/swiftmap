@@ -6,8 +6,8 @@ reconstructed batch) and ``site/`` (the ``Site`` -- the one growing map, the mer
 stored maps). ``Map`` is one stored map directory. Rendering/segmentation live in the pipeline.
 """
 
-from swiftmap.core.database.map import Map
-from swiftmap.core.database.site import Site
-from swiftmap.core.database.database import Database
+from swiftmap.database.map import Map
+from swiftmap.database.site import Site
+from swiftmap.database.database import Database
 
 __all__ = ["Database", "Map", "Site"]

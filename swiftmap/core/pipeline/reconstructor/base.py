@@ -2,11 +2,6 @@
 
 """Backbone-agnostic reconstructor interface.
 
-``BaseReconstructor`` defines the contract SwiftMap depends on and implements
-everything that does not depend on the specific reconstruction model:
-orchestration (``run``), which delegates all output -- scene.glb,
-confidence_map.glb, camera_poses.json -- to ``postprocess``.
-
 A concrete backbone implements just the four model-specific steps:
     initialize_model()      load weights
     _load_and_preprocess()  images on device, sized for this model
@@ -22,6 +17,8 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from swiftmap.database.map import Map
+from swiftmap.database.types import PointCloud
 from swiftmap.core.pipeline.reconstructor import postprocess
 
 
@@ -63,13 +60,14 @@ class BaseReconstructor(ABC):
     @abstractmethod
     def _decode_predictions(self, predictions: Dict[str, torch.Tensor],
                             images: torch.Tensor,
-                            keyframe_paths: List[str]) -> Dict[str, Any]:
+                            keyframe_paths: List[str]) -> PointCloud:
         """Convert raw predictions to the normalized numpy schema."""
 
     # ---------------------------------------------------------- orchestration
-    def run(self, keyframe_paths: List[str],
-           processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Run the full backbone -> 3D content -> confidence pipeline."""
+        keyframe_paths = map.get_keyframe_paths()
+
         if not self.is_initialized:
             if not self.initialize_model():
                 return {"success": False, "error": "Model initialization failed"}
@@ -79,6 +77,7 @@ class BaseReconstructor(ABC):
         params = self.default_params.copy()
         if processing_params:
             params.update(processing_params)
+        params["backbone"] = self.name
 
         try:
             print(f"[{self.name}] Processing {len(keyframe_paths)} keyframes...")
@@ -96,53 +95,63 @@ class BaseReconstructor(ABC):
             inference_time = time.time() - inference_start
 
             postprocess_start = time.time()
-            processed = self._decode_predictions(raw_predictions, images, keyframe_paths)
+            reconstruction = self._decode_predictions(raw_predictions, images, keyframe_paths)
             postprocess_time = time.time() - postprocess_start
 
+            # add the point cloud to the map
+            map.update_reconstruction(reconstruction)
+
             generation_start = time.time()
-            scene_results = postprocess.generate_3d_scene(processed, params)
+
+            # update the 3d scene result in the maps reconstruction field
+            postprocess.generate_3d_scene(map, params)
             generation_time = time.time() - generation_start
 
-            confidence_results: Dict[str, Any] = {}
-            if scene_results.get("target_directory"):
-                target_dir = scene_results["target_directory"]
-                try:
-                    conf_start = time.time()
-                    confidence_results = postprocess.generate_confidence_scene(
-                        processed, params, target_dir)
-                    confidence_results["generation_time"] = time.time() - conf_start
-                except Exception as e:
-                    print(f"Warning: Confidence mapping generation failed: {e}")
 
-                try:
-                    scene_results["camera_poses_path"] = postprocess.generate_camera_poses(
-                        processed, target_dir, self.name)
-                except Exception as e:
-                    print(f"Warning: Camera pose export failed: {e}")
+            # update the confidence map result in the maps reconstruction field
+            conf_generate_start = time.time()
+            postprocess.generate_confidence_scene(map, params)
+            conf_generate_time = time.time() - conf_generate_start
 
+            # update camera_poses
+            poses_start = time.time()
+            postprocess.generate_camera_poses(map, params)
+            poses_time = time.time() - poses_start
+
+            # write to disk
+            map.write2disk()
             total_processing_time = time.time() - processing_start
+
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
 
+            # logging the time
+            print(f"[{self.name}] Preprocessing time: {preprocess_time:.2f}s")
+            print(f"[{self.name}] Inference time: {inference_time:.2f}s")
+            print(f"[{self.name}] Postprocessing time: {postprocess_time:.2f}s")
+            print(f"[{self.name}] 3D scene generation time: {generation_time:.2f}s")
+            print(f"[{self.name}] Confidence map generation time: {conf_generate_time:.2f}s")
+            print(f"[{self.name}] Camera poses generation time: {poses_time:.2f}s")
             print(f"[{self.name}] processing completed in {total_processing_time:.2f}s")
+
             return {
                 "success": True,
                 "backbone": self.name,
                 "keyframe_count": len(keyframe_paths),
                 "processing_params": params,
-                "predictions": processed,
-                "scene_results": scene_results,
-                "confidence_results": confidence_results,
                 "timing": {
                     "total_processing": total_processing_time,
                     "preprocessing": preprocess_time,
                     "inference": inference_time,
                     "postprocessing": postprocess_time,
                     "3d_generation": generation_time,
+                    "confidence_generation": conf_generate_time,
+                    "camera_poses_generation": poses_time,
                 },
             }
+
         except Exception as e:
             print(f"Error during {self.name} processing: {e}")
             import traceback
