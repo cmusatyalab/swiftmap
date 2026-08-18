@@ -158,44 +158,60 @@ def cluster_objects(points: np.ndarray,
     return objects
 
 
-def segment(m: Map, query: str, segmenter, conf_threshold: float = 60.0) -> dict:
-    """Segment ``query`` on ``m``. A merged map has no per-frame images, so it returns
-    its inherited segmentation instead of running a new query."""
+def run(preds, query: str, segmenter, target_dir: str, conf_threshold: float = 60.0) -> dict:
+    """Segment ``query`` over a reconstruction: masks -> 3D points -> clustered objects.
+
+    Writes the highlight GLB into ``target_dir``. Returns the raw pieces (masks, points,
+    clusters) so each caller can shape its own result; ``{"error": ...}`` on failure.
+    """
+    query = (query or "").strip()
+    if not query:
+        return {"error": "Enter a segmentation query (e.g. 'person')."}
+    if "world_points" not in preds or "images" not in preds:
+        return {"error": "No reconstruction to segment."}
+
+    masks = segmenter.segment(frame_images(preds), query)
+    if masks is None:
+        return {"error": "Segmentation model failed to initialize."}
+    glb = export_highlight_glb(preds, masks, query, target_dir, conf_thres=conf_threshold)
+    pts, _ = masks_to_points(preds, masks, conf_thres=conf_threshold)
+
+    # Scene diagonal -> scale-invariant clustering radius.
+    wp = np.asarray(preds["world_points"]).reshape(-1, 3)
+    wp = wp[np.isfinite(wp).all(1)]
+    diag = float(np.linalg.norm(wp.max(0) - wp.min(0))) if len(wp) else 1.0
+
+    return {"success": True, "query": query, "glb_path": glb, "masks": masks,
+            "points": pts, "objects": cluster_objects(pts, diag),
+            "conf_threshold": float(conf_threshold)}
+
+
+def segment_map(m: Map, query: str, segmenter, conf_threshold: float = 60.0) -> dict:
+    """Segment a stored map. A merged map has no per-frame images, so it returns its
+    inherited segmentation instead of running a new query."""
     if not m.exists():
         return {"error": f"Unknown map '{m.tag}'."}
     if m.is_merged:
         return _inherited(m, query)
 
-    query = (query or "").strip()
-    if not query:
-        return {"error": "Enter a segmentation query (e.g. 'person')."}
-    preds = m.predictions
-    if "world_points" not in preds or "images" not in preds:
-        return {"error": f"Map '{m.tag}' has no reconstruction to segment."}
-
-    masks = segmenter.segment(lift.frame_images(preds), query)
-    if masks is None:
-        return {"error": "Segmentation model failed to initialize."}
-    glb = lift.export_highlight_glb(preds, masks, query, m.path, conf_thres=conf_threshold)
-    pts, _ = lift.masks_to_points(preds, masks, conf_thres=conf_threshold)
-
-    wp = np.asarray(preds["world_points"]).reshape(-1, 3)
-    wp = wp[np.isfinite(wp).all(1)]
-    diag = float(np.linalg.norm(wp.max(0) - wp.min(0))) if len(wp) else 1.0
+    res = run(m.predictions, query, segmenter, m.path, conf_threshold)
+    if "error" in res:
+        return res
 
     gt = m.transform
     items = []
-    for i, ob in enumerate(lift.cluster_objects(pts, diag)):
+    for i, ob in enumerate(res["objects"]):
         item = {"id": i, "position": np.asarray(ob["centroid"], float).tolist(),
                 "num_points": int(ob["num_points"]), "radius": float(ob["radius"])}
         if gt is not None:
             item["position_gps"] = np.asarray(gt.to_lla(ob["centroid"]), float).tolist()
         items.append(item)
 
-    _write_segmented(m, query, conf_threshold, gt is not None, items)
-    print(f"[map] segmented '{query}' on {m.tag}: {len(pts)} pts -> {len(items)} object(s)")
-    return {"success": True, "map_tag": m.tag, "query": query, "glb_path": glb,
-            "conf_threshold": float(conf_threshold), "num_points": int(len(pts)),
+    _write_segmented(m, res["query"], conf_threshold, gt is not None, items)
+    print(f"[map] segmented '{res['query']}' on {m.tag}: "
+          f"{len(res['points'])} pts -> {len(items)} object(s)")
+    return {"success": True, "map_tag": m.tag, "query": res["query"], "glb_path": res["glb_path"],
+            "conf_threshold": float(conf_threshold), "num_points": int(len(res["points"])),
             "num_objects": len(items), "gps_aligned": gt is not None, "objects": items}
 
 

@@ -32,7 +32,7 @@ class Site(Map):
              created: datetime = None) -> "Site":
         """Merge ``new_map`` into the site (origin pinned to the site) and rewrite its data.
 
-        Previews are a pipeline concern: the caller runs ``renderer.write_previews``."""
+        Views are rendered on demand through the session."""
         parts = [self.load()] if self.exists() else []
         parts.append(new_map.load(conf_thres))
         before = sum(len(p[0]) for p in parts)

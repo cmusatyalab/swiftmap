@@ -29,9 +29,6 @@ from typing import List, Optional
 
 from swiftmap.core import constants
 from swiftmap.core.transport import protocol
-from swiftmap.core.database import Database
-from swiftmap.core.pipeline import renderer
-from swiftmap.core.pipeline.segmentor import lift
 from swiftmap.core.session import MappingSession
 
 
@@ -65,7 +62,8 @@ class AutoMappingServer:
         self._root = os.getcwd()
 
         self.session = MappingSession(host=config.host,
-                                      min_disparity=config.min_disparity)
+                                      min_disparity=config.min_disparity,
+                                      root=self._root, site=config.site)
         self.session.max_keyframes = config.max_keyframes
         self.session.set_backbone(config.backbone)
         self.session.set_segmenter(config.segmenter)
@@ -76,10 +74,9 @@ class AutoMappingServer:
         self._run_idx = 0
         self._stop = threading.Event()
 
-        self.db = Database(self._root, config.site)
-        if self.db.site.exists():
-            print(f"[swiftmap-server] resuming growth of site '{self.db.site.name}' "
-                  f"({len(self.db.maps())} map(s) stored)")
+        if self.session.site.exists():
+            print(f"[swiftmap-server] resuming growth of site '{self.session.site.name}' "
+                  f"({len(self.session.maps())} map(s) stored)")
 
     def run(self):
         """Start collecting and block, growing the map whenever the cap fills."""
@@ -87,8 +84,8 @@ class AutoMappingServer:
         print(f"[swiftmap-server] site={self.cfg.site} backbone={self.cfg.backbone} "
               f"segmenter={self.cfg.segmenter} cap={self.cfg.max_keyframes} "
               f"merge_voxel={self.cfg.merge_voxel} m")
-        print(f"[swiftmap-server] maps -> {self.db.maps_dir}")
-        print(f"[swiftmap-server] site -> {self.db.site.path}")
+        print(f"[swiftmap-server] maps -> {self.session.maps_dir}")
+        print(f"[swiftmap-server] site -> {self.session.site.path}")
 
         if not self.session.start(port=self.cfg.port, keep_all=self.cfg.keep_all):
             raise RuntimeError("Failed to start the TCP collection server")
@@ -143,8 +140,8 @@ class AutoMappingServer:
         t0 = time.time()
         n = self.session.get_keyframe_count()
         created = datetime.now()
-        grew = self.db.site.exists()
-        new_map = self.db.create_map(created)
+        grew = self.session.site.exists()
+        new_map = self.session.new_map(created)
         print(f"\n[swiftmap-server] === run #{run}: {n} keyframes -> {new_map.tag} ===")
         try:
             params = {
@@ -183,14 +180,13 @@ class AutoMappingServer:
             # The batch is already a stored map; grow the site with it.
             new_map.stamp_metadata(self.cfg.site, created)
             stored = new_map
-            self.db.grow(stored, conf_thres=self.cfg.conf_threshold,
-                         voxel_size=self.cfg.merge_voxel, created=created)
-            renderer.write_previews(self.db.site)
-            n_points = self.db.site.metadata.num_points
-            n_cameras = len(self.db.site.frames)
+            self.session.grow_site(stored, conf_thres=self.cfg.conf_threshold,
+                                   voxel_size=self.cfg.merge_voxel, created=created)
+            n_points = self.session.site.metadata.num_points
+            n_cameras = len(self.session.site.frames)
 
             self.latest_run = {
-                "run": run, "map_tag": self.db.site.tag, "target_dir": self.db.site.path,
+                "run": run, "map_tag": self.session.site.tag, "target_dir": self.session.site.path,
                 "batch_tag": stored.tag,
                 "num_keyframes": n_cameras,
                 "num_points": n_points,
@@ -254,17 +250,17 @@ class AutoMappingServer:
         state["processing"] = self._processing
         state["keyframes"] = self.session.get_keyframe_count()
         state["cap"] = self.cfg.max_keyframes
-        state["current_map"] = self.db.site.tag if self.db.site.exists() else None
-        state["num_maps"] = len(self.db.maps())
+        state["current_map"] = self.session.site.tag if self.session.site.exists() else None
+        state["num_maps"] = len(self.session.maps())
         return state
 
     def list_map_tags(self) -> List[str]:
         """Selectable tags: the site first, then every stored map (newest first)."""
-        return self.db.tags()
+        return self.session.map_tags()
 
     def current_map_tag(self) -> Optional[str]:
         """The map being grown -- always the site."""
-        return self.db.site.tag if self.db.site.exists() else None
+        return self.session.site.tag if self.session.site.exists() else None
 
     def latest_map_tag(self) -> Optional[str]:
         tags = self.list_map_tags()
@@ -278,8 +274,7 @@ class AutoMappingServer:
     def render_map(self, map_tag: str, conf_level: float) -> dict:
         """Reconstruction + confidence-at-``conf_level`` GLBs for a stored map."""
         with self._lock:
-            m = self.db.get(map_tag)
-            return renderer.render(m, conf_level) if m else {"error": f"Unknown map '{map_tag}'."}
+            return self.session.render_map(map_tag, conf_level)
 
     def segment_map(self, map_tag: str, query: str, conf_level: float = None) -> dict:
         """Segment ``query`` on a stored ``map_tag`` at ``conf_level`` (request-driven).
@@ -289,9 +284,7 @@ class AutoMappingServer:
         """
         conf = self.cfg.conf_threshold if conf_level is None else float(conf_level)
         with self._lock:
-            m = self.db.get(map_tag)
-            res = lift.segment(m, query, self.session.segmenter, conf) if m \
-                else {"error": f"Unknown map '{map_tag}'."}
+            res = self.session.segment_map(map_tag, query, conf)
         glb = res.get("glb_path")
         if glb and not os.path.isabs(glb):
             res["glb_path"] = os.path.abspath(glb)

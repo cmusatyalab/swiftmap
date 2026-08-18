@@ -1,13 +1,13 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""Render a map: point-cloud + camera GLBs written into the map's own dir."""
+"""Render a map into viewable GLBs, written beside its data. Called through the session."""
 
 import os
 
 import numpy as np
 
 from swiftmap.core.database.map import Map
-from swiftmap.core.pipeline.renderer.confidence import generate_confidence_point_cloud
+from swiftmap.core.pipeline.utils.confidence import generate_confidence_point_cloud
 from swiftmap.core.pipeline.utils import geometry
 from swiftmap.core.database import cloud as arrays
 
@@ -36,7 +36,7 @@ def _render_scene(m: Map, conf_level):
         return path
     except Exception as e:
         print(f"[map] reconstruction render failed: {e}")
-        return _fallback(m, "scene.glb")
+        return None
 
 
 def _render_confidence(m: Map, conf_level):
@@ -60,22 +60,3 @@ def _render_confidence(m: Map, conf_level):
 
 
 # ----------------------------------------------------------------------- segment
-
-
-def _fallback(m: Map, name):
-    p = os.path.join(m.path, name)
-    return p if os.path.exists(p) else None
-
-
-def write_previews(m: Map) -> None:
-    """The map's default scene.glb + confidence_map.glb/.ply, from its stored cloud."""
-    z = np.load(os.path.join(m.path, "merged_points.npz"))
-    pts, cols, conf = z["points"], z["colors"], z["conf"]
-    geometry.pointcloud_scene(pts, cols, m.frames).export(os.path.join(m.path, "scene.glb"))
-    try:
-        scene, _, _ = generate_confidence_point_cloud(
-            pts, conf, conf_threshold=0.0, max_points=500000, save_ply=True,
-            ply_path=os.path.join(m.path, "confidence_map.ply"))
-        scene.export(os.path.join(m.path, "confidence_map.glb"))
-    except Exception as e:
-        print(f"[map] confidence map export failed: {e}")

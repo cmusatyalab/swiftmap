@@ -35,6 +35,8 @@ import cv2
 import numpy as np
 
 from swiftmap.core import constants
+from swiftmap.core.database import Database
+from swiftmap.core.pipeline.utils import render as render_utils
 from swiftmap.core.transport import protocol
 from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.transport.tcp_server import MappingTCPServer
@@ -50,8 +52,13 @@ class MappingSession:
     def __init__(self,
                  host: str = "0.0.0.0",
                  min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
-                 visualize_flow: bool = False):
+                 visualize_flow: bool = False,
+                 root: str = None,
+                 site: str = "map"):
         self.host = host
+
+        # The map database this session reads and writes (results root).
+        self.db = Database(root or os.getcwd(), site)
 
         # Core stages (all long-lived; the model loads lazily on first reconstruct).
         self.selector = KeyframeSelector(min_disparity=min_disparity,
@@ -435,41 +442,75 @@ class MappingSession:
         if self.segmenter is None or getattr(self.segmenter, "name", None) != name:
             self.segmenter = get_segmenter(name)
 
-        images = lift.frame_images(preds)
-        masks = self.segmenter.segment(images, query)
-        if masks is None:
-            return {"error": "Segmentation model failed to initialize."}
+        res = lift.run(preds, query, self.segmenter, self._target_dir(), conf_threshold)
+        if "error" in res:
+            return res
 
-        target_dir = self._target_dir()
-        glb_path = lift.export_highlight_glb(preds, masks, query, target_dir,
-                                                  conf_thres=conf_threshold)
-        pts, _ = lift.masks_to_points(preds, masks, conf_thres=conf_threshold)
-
-        # Scene diagonal -> scale-invariant clustering radius.
-        wp = np.asarray(preds["world_points"]).reshape(-1, 3)
-        wp = wp[np.isfinite(wp).all(1)]
-        diag = float(np.linalg.norm(wp.max(0) - wp.min(0))) if len(wp) else 1.0
-        objects = lift.cluster_objects(pts, diag)
-
-        # Attach a GPS centroid to each object when the scene is aligned.
-        for i, o in enumerate(objects):
+        objects = res["objects"]
+        for i, o in enumerate(objects):          # GPS centroid when the scene is aligned
             o["id"] = i
             gps = self.to_gps(o["centroid"])
             o["centroid_gps"] = gps.tolist() if gps is not None else None
 
         self.latest_segmentation = {
-            "query": query, "masks": masks, "points": pts, "objects": objects,
-            "glb_path": glb_path, "target_dir": target_dir, "segmenter": name,
+            "query": res["query"], "masks": res["masks"], "points": res["points"],
+            "objects": objects, "glb_path": res["glb_path"],
+            "target_dir": self._target_dir(), "segmenter": name,
             "conf_threshold": float(conf_threshold),
         }
-        print(f"Segmented '{query}' (conf>={conf_threshold}): "
-              f"{len(pts)} points -> {len(objects)} object(s)")
+        print(f"Segmented '{res['query']}' (conf>={conf_threshold}): "
+              f"{len(res['points'])} points -> {len(objects)} object(s)")
         return {
-            "success": True, "query": query, "glb_path": glb_path,
+            "success": True, "query": res["query"], "glb_path": res["glb_path"],
             "conf_threshold": float(conf_threshold),
-            "num_points": int(len(pts)), "num_objects": len(objects),
+            "num_points": int(len(res["points"])), "num_objects": len(objects),
             "objects": objects, "gps_aligned": self.gps_transform is not None,
         }
+
+    # ------------------------------------------------------- stored-map requests
+    def segment_map(self, map_tag: str, query: str,
+                    conf_threshold: float = None) -> Dict[str, Any]:
+        """Segment a stored map (the viewer's request path)."""
+        m = self.db.get(map_tag)
+        if m is None:
+            return {"error": f"Unknown map '{map_tag}'."}
+        conf = constants.DEFAULT_CONF_THRESHOLD if conf_threshold is None else float(conf_threshold)
+        if self.segmenter is None:
+            self.segmenter = get_segmenter(constants.DEFAULT_SEGMENTER)
+        return lift.segment_map(m, query, self.segmenter, conf)
+
+    def render_map(self, map_tag: str, conf_level: float) -> Dict[str, Any]:
+        """Render a stored map's GLBs at ``conf_level`` (the viewer's request path)."""
+        m = self.db.get(map_tag)
+        if m is None:
+            return {"error": f"Unknown map '{map_tag}'."}
+        return render_utils.render(m, conf_level)
+
+    def new_map(self, created=None):
+        """Create the map this run will write into."""
+        return self.db.create_map(created)
+
+    def grow_site(self, m, conf_thres: float = 50.0, voxel_size: float = 0.1, created=None):
+        """Merge a stored map into the site."""
+        return self.db.grow(m, conf_thres=conf_thres, voxel_size=voxel_size, created=created)
+
+    def map_tags(self):
+        """Selectable map tags (site first, then stored maps)."""
+        return self.db.tags()
+
+    @property
+    def site(self):
+        """The growing map this session merges into."""
+        return self.db.site
+
+    def maps(self):
+        """Stored maps, newest first."""
+        return self.db.maps()
+
+    @property
+    def maps_dir(self) -> str:
+        """Where stored maps live."""
+        return self.db.maps_dir
 
     # ============================================================== planning stage
     def plan(self, low_percentile: float = 60.0,

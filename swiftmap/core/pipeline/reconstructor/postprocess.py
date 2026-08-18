@@ -34,7 +34,7 @@ from swiftmap.core.database import cloud as arrays
 from swiftmap.core.database.georeference import Georeference
 
 try:
-    from swiftmap.core.pipeline.renderer.confidence import generate_confidence_point_cloud
+    from swiftmap.core.pipeline.utils.confidence import generate_confidence_point_cloud
     CONFIDENCE_MAPPING_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional viz deps
     CONFIDENCE_MAPPING_AVAILABLE = False

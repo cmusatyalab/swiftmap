@@ -209,7 +209,7 @@ class Map:
               source_maps=(), site: str = None, created: datetime = None) -> "Map":
         """Persist a cloud into this dir: cloud, transform, poses, map.json.
 
-        Data only -- previews come from ``pipeline.renderer.write_previews``."""
+        Data only -- views are rendered on demand through the session."""
         created = created or datetime.now()
         site = site or self.metadata.site or "map"
         os.makedirs(self.path, exist_ok=True)
