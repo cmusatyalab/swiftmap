@@ -47,9 +47,6 @@ class KeyframeSelector:
             "processing_times": [],
         }
 
-        # The disparity that selected each keyframe, in order; the session caps by it.
-        self.keyframe_values = []
-
         # Optical-flow overlay (BGR) of the last selected keyframe.
         self._keyframe_vis = None
 
@@ -65,11 +62,10 @@ class KeyframeSelector:
         """
         start = time.time()
         if self.keep_all:
-            # No selection: keep every frame and record 0.0 as the unused score.
+            # No selection: keep every frame.
             if self.visualize_flow:
                 self._keyframe_vis = image
             self._update_stats(time.time() - start, True)
-            self.keyframe_values.append(0.0)
             return True
         try:
             selected = self.frame_tracker.compute_disparity(
@@ -80,7 +76,6 @@ class KeyframeSelector:
             selected = False
         self._update_stats(time.time() - start, selected)
         if selected:
-            self.keyframe_values.append(float(self.frame_tracker.last_disparity))
             # Freeze the preview on the frame that was actually kept.
             self._keyframe_vis = self.frame_tracker.last_flow_vis
         return selected
@@ -103,7 +98,6 @@ class KeyframeSelector:
         self.stats["total_frames_processed"] = 0
         self.stats["keyframes_selected"] = 0
         self.stats["processing_times"] = []
-        self.keyframe_values = []
         self._keyframe_vis = None
 
     def configure_disparity_threshold(self, min_disparity: float):
