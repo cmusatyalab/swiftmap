@@ -24,7 +24,7 @@ import trimesh
 
 from swiftmap.core import constants
 from swiftmap.core.database.map import Map
-from swiftmap.core.pipeline.utils import geometry, kml
+from swiftmap.core.pipeline import utils as pipeline_utils
 from swiftmap.core.database import cloud as arrays
 
 RED = np.array([255, 0, 0], dtype=np.uint8)
@@ -96,7 +96,7 @@ def export_highlight_glb(predictions: Dict[str, Any], masks: np.ndarray,
     cols[len(bg_idx):] = RED                             # segmented points -> red
 
     scene = trimesh.Scene()
-    scene.add_geometry(geometry.pointcloud(pts, cols))
+    scene.add_geometry(pipeline_utils.pointcloud(pts, cols))
 
     safe = "".join(c if c.isalnum() else "_" for c in query.strip()) or "query"
     path = os.path.join(target_dir, f"segmented_{safe}.glb")
@@ -244,7 +244,7 @@ def _write_segmented(m: Map, query, conf, gps_aligned, items):
              "gps_aligned": gps_aligned, "num_objects": len(items), "objects": items})
     gps_items = [it for it in items if "position_gps" in it]
     if gps_items:
-        kml.write_kml(gps_items, os.path.join(m.path, f"segmented_{safe}.kml"),
+        pipeline_utils.write_kml(gps_items, os.path.join(m.path, f"segmented_{safe}.kml"),
                       gps_key="position_gps", doc_name=f"{m.tag}: {query}")
 
 

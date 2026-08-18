@@ -7,17 +7,17 @@ from swiftmap.core.session import MappingSession
 from swiftmap.core.transport.tcp_server import MappingTCPServer
 from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.pipeline.reconstructor import (
-    BaseMapper, VGGTMapper, VGGTOmegaMapper, get_mapper, available_mappers)
+    BaseReconstructor, VGGTReconstructor, VGGTOmegaReconstructor, get_reconstructor, available_reconstructors)
 from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner
 
 __all__ = [
     "MappingSession",
     "MappingTCPServer",
     "KeyframeSelector",
-    "BaseMapper",
-    "VGGTMapper",
-    "VGGTOmegaMapper",
-    "get_mapper",
-    "available_mappers",
+    "BaseReconstructor",
+    "VGGTReconstructor",
+    "VGGTOmegaReconstructor",
+    "get_reconstructor",
+    "available_reconstructors",
     "NextFlightPlanner",
 ]

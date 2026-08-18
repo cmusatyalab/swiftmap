@@ -16,36 +16,14 @@ from swiftmap.core.database.georeference import Georeference
 class Site(Map):
     """A ``Map`` that grows: each stored map is merged into it, in place."""
 
-    def __init__(self, path: str, name: str = "map"):
-        super().__init__(path)
-        self.name = name
-
-    def __repr__(self):
-        return f"Site({self.name!r}, {len(self.sources)} map(s))"
-
-    @property
-    def sources(self) -> list:
-        """Tags of the maps merged in so far."""
-        return list(self.metadata.source_maps)
-
     def grow(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
              created: datetime = None) -> "Site":
-        """Merge ``new_map`` into the site (origin pinned to the site) and rewrite its data.
+        """Merge ``new_map`` into the site (origin pinned to the site) and rewrite its data."""
 
-        Views are rendered on demand through the session."""
-        parts = [self.load()] if self.exists() else []
-        parts.append(new_map.load(conf_thres))
-        before = sum(len(p[0]) for p in parts)
-        pts, cols, conf, gt, frames = _merge(parts, voxel_size=voxel_size)
-        print(f"[site] grow with '{new_map.tag}': {before:,} -> {len(pts):,} pts "
-              f"(voxel {voxel_size:g} m, conf>={conf_thres:g}p, "
-              f"origin {gt.lat0:.6f},{gt.lon0:.6f},{gt.alt0:.1f})")
-        for stale in glob.glob(os.path.join(self.path, "*_view_c*.glb")):
-            os.remove(stale)
-        return self.write(pts, cols, conf, gt, frames,
-                          source_maps=self.sources + [new_map.tag],
-                          site=self.name, created=created)
 
+
+
+# ------------------------------------------------------------------- merge
 
 def voxel_merge(points, colors, conf, voxel_size: float):
     """Collapse points sharing a ``voxel_size`` grid cell into one, confidence-weighted.
@@ -80,8 +58,7 @@ def voxel_merge(points, colors, conf, voxel_size: float):
     return pos, np.clip(col, 0, 255).astype(np.uint8), mconf
 
 
-# ---------------------------------------------------------------------- meshing
-
+# ---------------------------------------------------------------------- merge helpers
 
 def _enu_frame_rotation(gt: Georeference, origin_lla) -> np.ndarray:
     """Rotation from a map's own ENU frame into the common ENU frame (tangent tilt)."""

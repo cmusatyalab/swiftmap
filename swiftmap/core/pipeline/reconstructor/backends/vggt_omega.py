@@ -2,7 +2,7 @@
 
 """VGGT-Omega backbone adapter.
 
-Wraps VGGT-Omega behind ``BaseMapper``. Unlike VGGT, Omega:
+Wraps VGGT-Omega behind ``BaseReconstructor``. Unlike VGGT, Omega:
   * loads from a local checkpoint (.pt) via ``torch.load`` + ``load_state_dict``
     (no hub URL) — see ``constants.VGGT_OMEGA_CHECKPOINT``;
   * preprocesses at a configurable ``image_resolution`` (patch size 16);
@@ -22,9 +22,9 @@ import numpy as np
 import torch
 
 from swiftmap.core import constants
-from swiftmap.core.pipeline.reconstructor.base import BaseMapper
-from swiftmap.core.pipeline.reconstructor.postprocess import camera_poses_from_extrinsics
-from swiftmap.core.pipeline.reconstructor.registry import register_mapper
+from swiftmap.core.pipeline.reconstructor.base import BaseReconstructor
+from swiftmap.core.pipeline.reconstructor.pose import camera_poses_from_extrinsics
+from swiftmap.core.pipeline.reconstructor.registry import register_reconstructor
 
 
 def _unproject_depth_map_to_point_map(depth_map: np.ndarray,
@@ -54,13 +54,13 @@ def _unproject_depth_map_to_point_map(depth_map: np.ndarray,
                      camera_points - translation[:, None, None, :])
 
 
-@register_mapper(
+@register_reconstructor(
     "vggt_omega",
     label="VGGT-Omega",
     description="VGGT-Omega (depth-based). Loads from a local checkpoint; "
                 "world points are unprojected from predicted depth.",
 )
-class VGGTOmegaMapper(BaseMapper):
+class VGGTOmegaReconstructor(BaseReconstructor):
     """VGGT-Omega reconstruction backbone."""
 
     def __init__(self, device=None,

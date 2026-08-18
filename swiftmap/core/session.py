@@ -28,7 +28,7 @@ from swiftmap.core.database import Database
 from swiftmap.core.transport import protocol
 from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.transport.tcp_server import MappingTCPServer
-from swiftmap.core.pipeline.reconstructor import get_mapper, is_registered
+from swiftmap.core.pipeline.reconstructor import get_reconstructor
 from swiftmap.core.pipeline.segmentor import get_segmenter, lift
 from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner
 from swiftmap.core.pipeline.gps_transformer import GpsTransformer
@@ -50,15 +50,10 @@ class MappingSession:
 
         # pipeline stages
         self.backbone: Optional[str] = None
-
-        self.reconstructor = get_mapper(backbone[0]) if backbone and is_registered(backbone[0]) else None
-        self.segmenter = get_segmenter(backbone[1]) if backbone and is_registered(backbone[1]) else None
+        self.reconstructor = get_reconstructor(backbone[0])
+        self.segmenter = get_segmenter(backbone[1])
         self.planner = NextFlightPlanner()
         self.aligner = GpsTransformer()
-
-        # state produced by the pipeline's last run
-        self.gps_transform = None  # set by align_gps()
-        self._reconstructed_gps: List = []  # GPS paired with the last batch, 1:1 with poses
 
         # transport
         self.batch_size = constants.DEFAULT_MAX_KEYFRAMES  # a batch closes at this size
@@ -154,27 +149,13 @@ class MappingSession:
     # ---------------------------------------------------------------- reconstruction
     def reconstruct(self, batch: List[Dict[str, Any]],
                     params: Dict[str, Any]) -> Dict[str, Any]:
-        """Run reconstruction on one closed batch (from ``tcp_server.next_batch()``).
-
-        Also pins ``_reconstructed_gps`` to exactly these keyframes, 1:1 with the
-        camera poses the backbone is about to produce.
-        """
-        if self.reconstructor is None:
-            return {"success": False, "error": "No model selected — choose a model first.",
-                    "keyframe_count": 0}
+        """Run reconstruction on one closed batch (from ``tcp_server.next_batch()``)."""
         paths = [e["path"] for e in batch]
-        self._reconstructed_gps = [e["gps"] for e in batch]
         if not paths:
             return {"success": False, "error": "No keyframes collected yet",
                     "keyframe_count": 0}
         print(f"Reconstructing {len(paths)} keyframes (batch_size={self.batch_size})")
-        return self.reconstructor.process_keyframes(paths, params)
-
-    @property
-    def latest_predictions(self) -> Optional[Dict[str, Any]]:
-        """The latest raw predictions, or None if no model / nothing processed yet."""
-        return self.reconstructor.latest_predictions if self.reconstructor is not None else None
-
+        return self.reconstructor.run(paths, params)
     # ---------------------------------------------------------------- planning
 
     # ------------------------------------------------------------ GPS alignment

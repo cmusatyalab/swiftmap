@@ -3,16 +3,16 @@
 """Backbone registry + factory.
 
 Each backbone registers under a stable key (``"vggt"``, ``"vggt_omega"``) with a label
-and description; ``get_mapper(name)`` builds it. Adding a backbone means importing its
+and description; ``get_reconstructor(name)`` builds it. Adding a backbone means importing its
 module -- no call site changes."""
 
 from typing import Callable, Dict, List, Type
 
-# name -> {"cls": BaseMapper subclass, "label": str, "description": str}
+# name -> {"cls": BaseReconstructor subclass, "label": str, "description": str}
 _REGISTRY: Dict[str, dict] = {}
 
 
-def register_mapper(name: str, label: str, description: str = "") -> Callable:
+def register_reconstructor(name: str, label: str, description: str = "") -> Callable:
     """Class decorator registering a backbone under ``name``."""
     def _wrap(cls: Type) -> Type:
         if name in _REGISTRY:
@@ -23,7 +23,7 @@ def register_mapper(name: str, label: str, description: str = "") -> Callable:
     return _wrap
 
 
-def get_mapper(name: str, **kwargs):
+def get_reconstructor(name: str, **kwargs):
     """Instantiate the backbone registered under ``name``.
 
     Backends are imported lazily so registering one does not import its heavy
@@ -35,7 +35,7 @@ def get_mapper(name: str, **kwargs):
     return _REGISTRY[name]["cls"](**kwargs)
 
 
-def available_mappers() -> List[dict]:
+def available_reconstructors() -> List[dict]:
     """List registered backbones as ``[{"name","label","description"}, ...]``.
 
     Used by the UI to build the model selector.
@@ -44,7 +44,3 @@ def available_mappers() -> List[dict]:
         {"name": name, "label": meta["label"], "description": meta["description"]}
         for name, meta in _REGISTRY.items()
     ]
-
-
-def is_registered(name: str) -> bool:
-    return name in _REGISTRY

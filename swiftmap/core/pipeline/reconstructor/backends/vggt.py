@@ -2,7 +2,7 @@
 
 """VGGT backbone adapter.
 
-Wraps facebook/VGGT-1B behind ``BaseMapper``. VGGT predicts world points
+Wraps facebook/VGGT-1B behind ``BaseReconstructor``. VGGT predicts world points
 directly (dedicated point head) and encodes camera pose as ``pose_enc`` decoded
 with ``pose_encoding_to_extri_intri``. The heavy ``vggt`` package is imported
 lazily inside methods so selecting a different backbone never imports it.
@@ -15,18 +15,18 @@ import numpy as np
 import torch
 
 from swiftmap.core import constants
-from swiftmap.core.pipeline.reconstructor.base import BaseMapper
-from swiftmap.core.pipeline.reconstructor.postprocess import camera_poses_from_extrinsics
-from swiftmap.core.pipeline.reconstructor.registry import register_mapper
+from swiftmap.core.pipeline.reconstructor.base import BaseReconstructor
+from swiftmap.core.pipeline.reconstructor.pose import camera_poses_from_extrinsics
+from swiftmap.core.pipeline.reconstructor.registry import register_reconstructor
 
 
-@register_mapper(
+@register_reconstructor(
     "vggt",
     label="VGGT-1B",
     description="Visual Geometry Grounded Transformer (facebook/VGGT-1B). "
                 "Predicts world points directly via a point head.",
 )
-class VGGTMapper(BaseMapper):
+class VGGTReconstructor(BaseReconstructor):
     """VGGT reconstruction backbone."""
 
     def initialize_model(self) -> bool:

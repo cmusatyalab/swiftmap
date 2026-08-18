@@ -24,50 +24,20 @@ SITE_DIRNAME = "site"
 class Database:
     """The result dir: every stored map under ``maps/``, plus the growing ``site/``."""
 
-    def __init__(self, root: str, site_name: str = "map"):
-        self.root = os.path.abspath(root)
-        self.site = Site(os.path.join(self.root, SITE_DIRNAME), site_name)
-
-    def __repr__(self):
-        return f"Database({self.root!r}, {len(self.maps())} map(s))"
-
-    @property
-    def maps_dir(self) -> str:
-        return os.path.join(self.root, MAPS_DIRNAME)
-
-    def maps(self) -> List[Map]:
+    def get_maps(self) -> List[Map]:
         """Stored maps, newest first."""
-        return Map.list(self.maps_dir)
 
-    def tags(self) -> List[str]:
-        """The site (when it exists) first, then every stored map."""
-        return ([self.site.tag] if self.site.exists() else []) + [m.tag for m in self.maps()]
+    def get_site(self) -> Site:
+        """The growing site map (tag ``site``)."""
 
-    def get(self, tag: str) -> Optional[Map]:
-        """The site (tag ``site``) or a stored map by tag."""
-        if tag == self.site.tag:
-            return self.site if self.site.exists() else None
-        return Map.get(self.maps_dir, tag)
+    def create_site(self, created: datetime = None) -> Site:
+        """Create the site map under ``site/`` for the first time."""
 
     def create_map(self, created: datetime = None) -> Map:
         """Create an empty map under ``maps/`` for a run to write into."""
-        created = created or datetime.now()
-        m = Map(os.path.join(self.maps_dir, Map.tag_for("map", created)))
-        os.makedirs(m.path, exist_ok=True)
-        m.stamp_metadata(self.site.name, created)
-        print(f"[db] created map '{m.tag}'")
-        return m
 
-    def grow(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
-             created: datetime = None) -> Site:
+    def grow_site(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
+                  created: datetime = None) -> Site:
         """Grow the site with a stored map."""
         return self.site.grow(new_map, conf_thres=conf_thres, voxel_size=voxel_size,
                               created=created)
-
-    def delete(self, tag: str) -> bool:
-        """Delete a stored map (the site is never deleted here)."""
-        m = Map.get(self.maps_dir, tag)
-        if m is None:
-            return False
-        m.delete()
-        return True
