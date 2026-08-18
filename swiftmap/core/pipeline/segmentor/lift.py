@@ -252,19 +252,6 @@ def _write_segmented(m: Map, query, conf, gps_aligned, items):
 # --------------------------------------------------------------------- NFN plan
 
 
-def write_segmented_objects(items, seg_query, conf_threshold, gps_transform, target_dir) -> str:
-    """Write segmented_objects.json (+ KML when any object has GPS)."""
-    path = _dump(target_dir, "segmented_objects.json",
-                 {"query": seg_query, "conf_threshold": conf_threshold,
-                  "gps_aligned": gps_transform is not None,
-                  "num_objects": len(items), "objects": items})
-    gps_items = [s for s in items if "position_gps" in s]
-    if gps_items:
-        kml.write_kml(gps_items, os.path.join(target_dir, "segmented_objects.kml"),
-                      gps_key="position_gps", doc_name=f"SwiftMap Segmented: {seg_query}")
-    return path
-
-
 def _safe(text) -> str:
     return "".join(c if c.isalnum() else "_" for c in (text or "").strip())
 

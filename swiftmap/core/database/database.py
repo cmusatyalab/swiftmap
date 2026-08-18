@@ -1,6 +1,6 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""The ``Database``: the result dir, and the interface the server and frontend use.
+"""The ``Database``: the result dir, reached through the session.
 
     <root>/maps/   one dir per reconstructed batch (images, sky masks, GLB/PLY, NFN,
                    transform.json, map.json)

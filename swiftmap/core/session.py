@@ -4,7 +4,7 @@
 Mapping Session
 
 The orchestration layer for one mapping run. A ``MappingSession`` is the single
-middle layer between the frontend and the core stages — it owns and coordinates
+middle layer between the server and the core stages — it owns and coordinates
 all of them:
 
     collection :  MappingTCPServer + KeyframeSelector (transport: ingest + decision)
@@ -16,9 +16,9 @@ The pipeline for a run:
 
     drone --TCP--> tcp_server --frame--> _on_frame -> selector.is_keyframe   (collect)
     reconstruct() -> mapper.process_keyframes(<collected keyframes>)         (map)
-    generate_confidence_map() / plan()                                        (evaluate + replan)
+    plan()                                                                   (evaluate + replan)
 
-The frontend drives the session (start/stop, reconstruct, plan, export) and reads
+The server drives the session (start/stop, reconstruct, plan, export) and reads
 state from it; it never touches sockets, the model, or the planner directly. The
 session is long-lived — created once — so the (expensive) VGGT model persists
 across capture start/stop cycles. ``start(port, …)`` controls only the transport.
@@ -40,8 +40,8 @@ from swiftmap.core.pipeline.utils import render as render_utils
 from swiftmap.core.transport import protocol
 from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.transport.tcp_server import MappingTCPServer
-from swiftmap.core.pipeline.reconstructor import get_mapper, available_mappers, is_registered
-from swiftmap.core.pipeline.segmentor import get_segmenter, available_segmenters, lift
+from swiftmap.core.pipeline.reconstructor import get_mapper, is_registered
+from swiftmap.core.pipeline.segmentor import get_segmenter, lift
 from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner, write_plan
 from swiftmap.core.pipeline.gps_transformer import GpsTransformer
 
@@ -52,7 +52,6 @@ class MappingSession:
     def __init__(self,
                  host: str = "0.0.0.0",
                  min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
-                 visualize_flow: bool = False,
                  root: str = None,
                  site: str = "map"):
         self.host = host
@@ -61,8 +60,7 @@ class MappingSession:
         self.db = Database(root or os.getcwd(), site)
 
         # Core stages (all long-lived; the model loads lazily on first reconstruct).
-        self.selector = KeyframeSelector(min_disparity=min_disparity,
-                                         visualize_flow=visualize_flow)
+        self.selector = KeyframeSelector(min_disparity=min_disparity)
         # The reconstruction backbone is chosen at runtime (VGGT / VGGT-Omega /
         # ...): no mapper exists until the user selects one via set_backbone().
         self.backbone: Optional[str] = None
@@ -70,10 +68,8 @@ class MappingSession:
         self.planner = NextFlightPlanner()
         self.aligner = GpsTransformer()
 
-        # Text-promptable segmentation (SAM 3), built lazily on first segment().
+        # Text-promptable segmentation (SAM 3), built lazily on first request.
         self.segmenter = None
-        # Latest segmentation result: {query, masks, points, objects, glb_path, ...}
-        self.latest_segmentation = None
 
         # Optional local->GPS alignment (set via calibrate_gps()).
         self.gps_transform = None
@@ -117,7 +113,6 @@ class MappingSession:
     def start(self,
               port: int = protocol.TCP_PORT,
               min_disparity: Optional[float] = None,
-              visualize_flow: Optional[bool] = None,
               keep_all: Optional[bool] = None) -> bool:
         """Start the TCP transport and begin collecting keyframes.
 
@@ -130,8 +125,6 @@ class MappingSession:
 
         if min_disparity is not None:
             self.selector.configure_disparity_threshold(min_disparity)
-        if visualize_flow is not None:
-            self.selector.visualize_flow = visualize_flow
         if keep_all is not None:
             self.selector.keep_all = keep_all
 
@@ -226,10 +219,6 @@ class MappingSession:
             os.remove(path)
         except OSError:
             pass
-
-    def latest_flow_vis(self):
-        """Latest optical-flow preview (RGB) for the UI, or None if viz is off."""
-        return self.selector.latest_flow_vis
 
     # -------------------------------------------------------- bounded keyframe buffer
     def _drain(self):
@@ -333,10 +322,6 @@ class MappingSession:
         self.selector.configure_disparity_threshold(min_disparity)
 
     # =============================================================== mapping stage
-    def available_backbones(self) -> List[Dict[str, str]]:
-        """Registered reconstruction backbones (for the UI model picker)."""
-        return available_mappers()
-
     def set_backbone(self, name: str) -> Dict[str, Any]:
         """Select the reconstruction backbone by key (e.g. 'vggt', 'vggt_omega').
 
@@ -352,10 +337,6 @@ class MappingSession:
         self.backbone = name
         print(f"Reconstruction backbone set to: {name}")
         return {"backbone": name, "changed": True}
-
-    def available_segmenter_models(self) -> List[Dict[str, str]]:
-        """Registered segmentation backends (for the UI model picker)."""
-        return available_segmenters()
 
     def set_segmenter(self, name: str) -> Dict[str, Any]:
         """Select the segmentation backend by key (e.g. 'sam3'); built lazily."""
@@ -397,77 +378,6 @@ class MappingSession:
         """The latest raw predictions, or None if no model / nothing processed yet."""
         return self.mapper.latest_predictions if self.mapper is not None else None
 
-    def generate_confidence_map(self, conf_threshold: float) -> Dict[str, Any]:
-        """(Re)generate the map-quality (confidence) point cloud from the latest run."""
-        latest = self.get_latest_results()
-        if "error" in latest:
-            return {"error": "No VGGT processing results available. Process keyframes first."}
-        if not latest.get("confidence_scene"):
-            return {"error": "No confidence data available. Process keyframes first."}
-        target_dir = latest.get("scene_results", {}).get("target_directory")
-        if not target_dir:
-            return {"error": "No target directory available. Process keyframes first."}
-        params = {"conf_threshold": float(conf_threshold)}
-        return self.mapper._generate_confidence_mapping(
-            latest["predictions"], params, target_dir)
-
-    # ============================================================== semantic stage
-    def segment(self, query: str, conf_threshold: Optional[float] = None,
-                segmenter_name: Optional[str] = None) -> Dict[str, Any]:
-        """Text-promptable segmentation over the latest reconstruction.
-
-        Runs the segmenter (SAM 3) on VGGT's internal frames, reprojects masks to
-        3D via ``world_points``, writes a highlight GLB (queried points in red)
-        into the run dir, and spatially clusters the segmented points into objects
-        (with GPS centroids when the scene is GPS-aligned). Result is cached on
-        ``self.latest_segmentation`` and folded into the NFN export.
-
-        ``conf_threshold`` is the confidence percentile cut (same as the
-        Processing-Control slider); defaults to the value used for the last
-        reconstruction so the segmented points match what the viewer shows.
-        """
-        query = (query or "").strip()
-        if not query:
-            return {"error": "Enter a segmentation query (e.g. 'person')."}
-        preds = self.latest_predictions
-        if not preds or "world_points" not in preds or "images" not in preds:
-            return {"error": "No reconstruction to segment — process keyframes first."}
-
-        if conf_threshold is None:
-            info = self.mapper.latest_keyframes_info or {}
-            conf_threshold = info.get("processing_params", {}).get(
-                "conf_threshold", constants.DEFAULT_CONF_THRESHOLD)
-
-        name = segmenter_name or constants.DEFAULT_SEGMENTER
-        if self.segmenter is None or getattr(self.segmenter, "name", None) != name:
-            self.segmenter = get_segmenter(name)
-
-        res = lift.run(preds, query, self.segmenter, self._target_dir(), conf_threshold)
-        if "error" in res:
-            return res
-
-        objects = res["objects"]
-        for i, o in enumerate(objects):          # GPS centroid when the scene is aligned
-            o["id"] = i
-            gps = self.to_gps(o["centroid"])
-            o["centroid_gps"] = gps.tolist() if gps is not None else None
-
-        self.latest_segmentation = {
-            "query": res["query"], "masks": res["masks"], "points": res["points"],
-            "objects": objects, "glb_path": res["glb_path"],
-            "target_dir": self._target_dir(), "segmenter": name,
-            "conf_threshold": float(conf_threshold),
-        }
-        print(f"Segmented '{res['query']}' (conf>={conf_threshold}): "
-              f"{len(res['points'])} points -> {len(objects)} object(s)")
-        return {
-            "success": True, "query": res["query"], "glb_path": res["glb_path"],
-            "conf_threshold": float(conf_threshold),
-            "num_points": int(len(res["points"])), "num_objects": len(objects),
-            "objects": objects, "gps_aligned": self.gps_transform is not None,
-        }
-
-    # ------------------------------------------------------- stored-map requests
     def segment_map(self, map_tag: str, query: str,
                     conf_threshold: float = None) -> Dict[str, Any]:
         """Segment a stored map (the viewer's request path)."""
@@ -670,44 +580,7 @@ class MappingSession:
         """Write the latest NFN plan (GPS-tagged when aligned) to the run dir."""
         if not self.latest_plan:
             return None
-        seg = self.latest_segmentation
-        return write_plan(
-            self.latest_plan, self.gps_transform, self._target_dir(),
-            segmented=self._segmented_object_items(),
-            seg_query=seg.get("query") if seg else None)
-    # ================================================================ export stage
-    def _segmented_object_items(self) -> List[Dict[str, Any]]:
-        """Serializable per-object records for the latest segmentation.
-
-        GPS is recomputed against the current alignment so it stays fresh even if
-        the scene was GPS-calibrated after segmenting. Empty if no segmentation.
-        """
-        seg = self.latest_segmentation
-        if not seg or not seg.get("objects"):
-            return []
-        items = []
-        for o in seg["objects"]:
-            item = {
-                "id": int(o.get("id", 0)),
-                "position": np.asarray(o["centroid"], dtype=float).tolist(),
-                "num_points": int(o.get("num_points", 0)),
-                "radius": float(o.get("radius", 0.0)),
-            }
-            gps = self.to_gps(o["centroid"])
-            if gps is not None:
-                item["position_gps"] = gps.tolist()  # [lat, lon, alt]
-            items.append(item)
-        return items
-
-    def export_segmented_objects(self) -> Optional[str]:
-        """Write ``segmented_objects.json`` (+ KML when aligned) to the run dir."""
-        seg = self.latest_segmentation
-        items = self._segmented_object_items()
-        if not items:
-            return None
-        return lift.write_segmented_objects(
-            items, seg.get("query"), seg.get("conf_threshold"),
-            self.gps_transform, seg.get("target_dir") or self._target_dir())
+        return write_plan(self.latest_plan, self.gps_transform, self._target_dir())
     def export_camera_poses(self) -> Optional[str]:
         """Write estimated camera poses to the run's output dir; return the path."""
         if not self.latest_predictions:

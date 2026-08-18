@@ -51,7 +51,6 @@ class BaseMapper(ABC):
         # Latest-run storage (read back by the session / UI).
         self.latest_predictions = None
         self.latest_scene = None
-        self.latest_confidence_scene = None
         self.latest_scene_results: Dict[str, Any] = {}
         self.latest_confidence_results: Dict[str, Any] = {}
         self.latest_keyframes_info = None
@@ -134,7 +133,6 @@ class BaseMapper(ABC):
 
             self.latest_predictions = processed
             self.latest_scene = scene_results.get("scene")
-            self.latest_confidence_scene = confidence_results.get("scene")
             self.latest_scene_results = scene_results
             self.latest_confidence_results = confidence_results
             self.latest_keyframes_info = {
@@ -172,19 +170,12 @@ class BaseMapper(ABC):
             return {"success": False, "error": str(e)}
 
     # ------------------------------------------------------------------- shared
-    def _generate_confidence_mapping(self, predictions: Dict[str, Any],
-                                     params: Dict[str, Any],
-                                     target_dir: str) -> Dict[str, Any]:
-        """Kept as a method for callers that regenerate the confidence map."""
-        return postprocess.generate_confidence_mapping(predictions, params, target_dir)
-
     def get_latest_results(self) -> Dict[str, Any]:
         if self.latest_predictions is None:
             return {"error": "No processing results available"}
         return {
             "predictions": self.latest_predictions,
             "scene": self.latest_scene,
-            "confidence_scene": self.latest_confidence_scene,
             "scene_results": self.latest_scene_results,
             "confidence_results": self.latest_confidence_results,
             "keyframes_info": self.latest_keyframes_info,
@@ -235,7 +226,6 @@ class BaseMapper(ABC):
     def clear_results(self):
         self.latest_predictions = None
         self.latest_scene = None
-        self.latest_confidence_scene = None
         self.latest_scene_results = {}
         self.latest_confidence_results = {}
         self.latest_keyframes_info = None

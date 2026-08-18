@@ -46,12 +46,9 @@ SwiftMap turns a stream (or folder) of drone frames — each optionally carrying
 5. **GPS alignment** — the reconstruction is fit to the streamed GPS, so NFN viewpoints and segmented
    objects export as lat/lon (JSON + KML for Google My Maps).
 
-Two front ends share the same core:
-
-| | Entry point | Use |
-|---|---|---|
-| **GUI** | `launch_mapping.py` | interactive Gradio web app (step through each stage) |
-| **Headless server** | `launch_server.py` / `swiftmap.server` | container that auto-runs the whole pipeline at the keyframe cap (for SteelEagle) |
+One entry point drives the core: `launch_server.py` (`swiftmap.server`) — a container that
+auto-runs the whole pipeline at the keyframe cap (for SteelEagle) and serves results through its
+own viewer.
 
 ---
 
@@ -59,29 +56,22 @@ Two front ends share the same core:
 
 ```
 swift_map/
-├── launch_mapping.py         # GUI entry point (Gradio web app)
 ├── launch_server.py          # headless auto-mapping server entry point
 ├── Dockerfile                # server container image
 ├── pyproject.toml            # deps (uv); model backbones are optional extras
 ├── swiftmap/
 │   ├── core/
-│   │   ├── session.py            # MappingSession — request-driven orchestrator
+│   │   ├── session.py            # MappingSession — the single gateway to the core
 │   │   ├── constants.py
-│   │   ├── primitives/           # shared leaf: geometry.py + types.py
-│   │   │                         #   (MapData, Georeference, Reconstruction; point/scene primitives)
-│   │   ├── database/             # map.py — the map store (Map: load/render/segment/write/merge)
-│   │   ├── transport/            # protocol.py (wire protocol) + tcp_server.py (TCP frame+GPS ingest)
-│   │   └── pipeline/             # per-stage operations, built on primitives
-│   │       ├── keyframe_selector/    # optical-flow keyframe selection
-│   │       ├── reconstructor/        # pluggable reconstruction backbones
-│   │       │   ├── base.py           #   BaseMapper + registry
-│   │       │   ├── backends/         #   vggt.py, vggt_omega.py
-│   │       │   └── postprocess / scene_export / confidence_mapping / sky_mask
+│   │   ├── transport/            # ingest: protocol.py, tcp_server.py, keyframe_selector/
+│   │   ├── database/             # the store: Map (+MapMetaData), Site (growing map), Database
+│   │   └── pipeline/             # post-batch stages, each taking a Map
+│   │       ├── reconstructor/        # pluggable backbones (base, registry, backends/, postprocess, sky_mask)
 │   │       ├── gps_transformer/      # local ↔ GPS (Umeyama / ICP)
 │   │       ├── segmentor/            # text-prompt segmentation (SAM 3) + 3D lift
-│   │       └── next_flight_planner/  # Next Flight Navigation planner + KML export
-│   ├── server/                   # headless AutoMappingServer (grow-and-merge)
-│   └── frontend/                 # Gradio GUI + Viser NFN viewer
+│   │       ├── next_flight_planner/  # NFN planner + plan/KML export
+│   │       └── utils/                # geometry, kml, confidence, render helpers
+│   └── server/                   # AutoMappingServer (grow-and-merge) + results viewer
 └── test/test_client.py       # streaming test client
 ```
 
@@ -118,46 +108,10 @@ Run anything with `uv run …` (no venv to activate).
 
 ---
 
-## A. Run the GUI
-
-```bash
-uv run python launch_mapping.py          # default http://localhost:7866
-```
-
-Open the printed URL. Two 3D viewers sit on top (**3D Reconstruction**, **Confidence Map**); the
-control tabs are below.
-
-**1. Collect keyframes** — tab **SwiftMap Mapping Engine Control**
-- Set **TCP Port** (default `43322`) and **Min Disparity** (larger = fewer keyframes), click
-  **Start**. Then stream frames from another terminal:
-  ```bash
-  uv run python test/test_client.py --host localhost --port 43322 \
-         --image-dir data/test_images --delay 0.1
-  ```
-- Watch **Collected Keyframes** rise.
-
-**2. Pick models** — tab **Processing Control**
-- Choose a **Reconstruction model** (VGGT / VGGT-Omega) and, to segment, a **Segmentation model**
-  (SAM 3). Controls stay grayed out until a model is selected.
-
-**3. Map & evaluate**
-- **3D Mapping** → fills the left viewer. **Generate Confidence Map** → right viewer (red = weak,
-  green = solid).
-- **Segment** with a query (e.g. `person`) → the left viewer highlights the matched points in red.
-
-**4. Geolocate & plan**
-- **Calibrate GPS Alignment** (needs streamed GPS or a CSV) so results get lat/lon.
-- **Analyze with NFN** → opens an interactive **Viser** viewer (separate page) with regions to
-  improve, clusters, suggested viewpoints, and existing cameras.
-
-**5. Export** — tick the artifacts you want (each enables once it exists) and click **Export selected**.
-
----
-
-## B. Run the headless server
+## Run the server
 
 The server collects frame+GPS pairs and, once the keyframe cap fills, **auto-runs the whole pipeline**
-(reconstruct → GPS-align → NFN → segment → export) and writes everything to an output directory. No GUI.
+(reconstruct → GPS-align → NFN) and grows a single merged site under the output directory.
 
 ```bash
 uv run python launch_server.py \
@@ -178,7 +132,7 @@ All flags have env equivalents (see `python launch_server.py --help`):
 
 ---
 
-## C. Docker / SteelEagle deployment
+## Docker / SteelEagle deployment
 
 SwiftMap plugs into the [SteelEagle](https://github.com/cmusatyalab/steeleagle) backend as a mapping
 server that the **SwiftMap cognitive engine** forwards to (like the SLAM engine → TerraSLAM).

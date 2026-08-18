@@ -24,7 +24,6 @@ dependencies = [
     "requests",
     "pymap3d",          # ENU <-> geodetic (GPS) conversion for geo-alignment
     "gradio==5.17.1",
-    "viser==0.2.23",
 
     # Sky masking via skyseg.onnx (model auto-downloaded on first use).
     # On by default (--mask-sky), so kept in the core set.

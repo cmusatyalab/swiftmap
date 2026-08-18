@@ -12,8 +12,8 @@ a map-quality evaluation, and a next-flight plan:
 4. Evaluate confidence, plan the next flight (NFN), and optionally segment
    objects by text query (SAM 3), with results exportable + GPS-tagged.
 
-Two front ends share the same core: the Gradio GUI (``launch_mapping.py``) and
-the headless auto-mapping server (``launch_server.py`` / ``swiftmap.server``).
+The headless auto-mapping server (``launch_server.py`` / ``swiftmap.server``) drives
+the core and serves results through its own viewer.
 """
 
 from importlib.metadata import version, PackageNotFoundError
@@ -29,13 +29,6 @@ from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.pipeline.reconstructor import (
     BaseMapper, VGGTMapper, VGGTOmegaMapper, get_mapper, available_mappers)
 
-# The Gradio GUI is optional: the headless mapping server (swiftmap.server) runs
-# without gradio/viser installed, so importing the frontend must not be required.
-try:
-    from swiftmap.frontend.gradio_interface import MappingGradioInterface
-except ImportError:
-    MappingGradioInterface = None
-
 # Keyframe selection helper
 from swiftmap.core.transport.keyframe_selector import FrameTracker
 
@@ -48,6 +41,5 @@ __all__ = [
     "VGGTOmegaMapper",
     "get_mapper",
     "available_mappers",
-    "MappingGradioInterface",
     "FrameTracker"
 ]
