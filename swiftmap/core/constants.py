@@ -5,6 +5,9 @@ them. Wire-protocol constants live in ``transport/protocol.py``."""
 
 import os
 
+# --- Service ports ----------------------------------------------------------
+GUI_PORT = 7866      # Gradio web interface
+
 # --- Keyframe selection -----------------------------------------------------
 # Minimum mean optical-flow disparity (px) for a frame to be kept as a keyframe.
 DEFAULT_MIN_DISPARITY = 40.0
@@ -14,31 +17,26 @@ DEFAULT_MAX_KEYFRAMES = 70
 # --- Reconstruction / confidence -------------------------------------------
 # Confidence threshold (percentile, %) used when filtering the point cloud.
 DEFAULT_CONF_THRESHOLD = 60.0
-
-# --- Next-Flight Navigation (NFN) ------------------------------------------
-# Percentile band that marks "to-improve" (low-but-not-lowest confidence) regions.
-NFN_LOW_PERCENTILE = 60.0
-NFN_HIGH_PERCENTILE = 80.0
-
-# --- Service ports ----------------------------------------------------------
-GUI_PORT = 7866      # Gradio web interface
-NFN_VISER_PORT = 7867  # Viser NFN viewer (opened on demand)
-
-# --- Model asset URLs -------------------------------------------------------
+DEFAULT_RECONSTRUCTOR = os.environ.get("SWIFTMAP_RECONSTRUCTOR", "vggt-omega")
+# Model asset URLs 
 VGGT_MODEL_URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
 SKYSEG_ONNX_URL = "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx"
 SKYSEG_ONNX_PATH = os.path.join(
     os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
     "swiftmap", "skyseg.onnx")
-
-# --- VGGT-Omega -------------------------------------------------------------
+# VGGT-Omega
 # Omega loads from a local .pt (no hub); match the resolution to the checkpoint.
 VGGT_OMEGA_CHECKPOINT = os.environ.get(
     "VGGT_OMEGA_CHECKPOINT",
     "/home/ubuntu/xianglic/vggt-omega/checkpoints/vggt_omega_1b_512-002.pt")
 VGGT_OMEGA_IMAGE_RESOLUTION = int(os.environ.get("VGGT_OMEGA_IMAGE_RESOLUTION", "512"))
 
-# --- Semantic segmentation (SAM 3) -----------------------------------------
+# --- Next-Flight Navigation ------------------------------------------
+# Percentile band that marks "to-improve" (low-but-not-lowest confidence) regions.
+NFN_LOW_PERCENTILE = 60.0
+NFN_HIGH_PERCENTILE = 80.0
+
+# --- Semantic segmentation -----------------------------------------
 # Point SAM3_CHECKPOINT at a local .pt; empty falls back to the facebook/sam3 hub.
 SAM3_CHECKPOINT = os.environ.get("SAM3_CHECKPOINT", "")  # "" -> download from HF
 # BPE tokenizer vocab shipped in the SAM 3 repo assets (needed by the text encoder).
@@ -49,8 +47,7 @@ SAM3_BPE_PATH = os.environ.get(
 SAM3_CONF_THRESHOLD = float(os.environ.get("SAM3_CONF_THRESHOLD", "0.5"))
 # Default segmentation backend (registered in swiftmap.core.pipeline.segmentor).
 DEFAULT_SEGMENTER = os.environ.get("SWIFTMAP_SEGMENTER", "sam3")
-
-# --- Segmented-object clustering (v1: spatial) -----------------------------
+# Segmented-object clustering (v1: spatial) --
 # eps is a fraction of the scene diagonal, so clustering is scale-invariant.
 SEG_CLUSTER_EPS_FRACTION = float(os.environ.get("SEG_CLUSTER_EPS_FRACTION", "0.02"))
 SEG_CLUSTER_MIN_POINTS = int(os.environ.get("SEG_CLUSTER_MIN_POINTS", "20"))

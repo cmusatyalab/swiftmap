@@ -3,7 +3,7 @@
 """
 SwiftMap headless mapping server (no GUI).
 
-Collects frame+GPS pairs over TCP and, each time the keyframe cap fills, runs the
+Collects frame+GPS pairs over TCP and, each time a batch of keyframes fills, runs the
 whole pipeline (reconstruction, GPS alignment, NFN, segmentation) and exports the
 results to the output directory. This is the container entrypoint that SteelEagle's
 SwiftMap cognitive engine connects to.
@@ -15,7 +15,7 @@ Config is read from env vars (below), overridable by CLI flags:
     SWIFTMAP_BACKBONE        vggt | vggt_omega         (default vggt)
     SWIFTMAP_SEGMENTER       segmentation model        (default sam3)
     SWIFTMAP_SITE            site-tag prefix           (default site)
-    SWIFTMAP_MAX_KEYFRAMES   cap that triggers a run   (default 70)
+    SWIFTMAP_MAX_KEYFRAMES   keyframes per batch       (default 70)
     SWIFTMAP_CONF_THRESHOLD  confidence percentile     (default 60)
     SWIFTMAP_MERGE_VOXEL     grow-merge voxel size (m) (default 0.1)
     SWIFTMAP_MASK_SKY        true|false                (default true)
