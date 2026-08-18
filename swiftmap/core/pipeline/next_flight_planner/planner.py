@@ -75,9 +75,7 @@ class NextFlightPlanner:
         p_low = float(np.percentile(conf, self.low_percentile))
         p_high = float(np.percentile(conf, self.high_percentile))
         if p_low >= p_high:
-            # Confidence is (near-)uniform across all points, so there is no
-            # low-but-not-lowest band to target. VGGT was weakly confident everywhere
-            # -> refuse to plan and let the UI explain it.
+            # Confidence is near-uniform, so there is no weak band to target.
             return self._empty(
                 "VGGT confidence is saturated (near-uniform across all points), so there "
                 "are no low-confidence regions to target. The reconstruction is weakly "
@@ -120,8 +118,7 @@ class NextFlightPlanner:
                 normal = -normal
             radius = float(np.linalg.norm(cpts - centroid, axis=1).max())
 
-            # Oblique stand-off: tilt away from the normal at a per-cluster azimuth so the
-            # suggested views cover varied directions (not all straight-down nadir).
+            # Tilt off the normal per cluster so the views vary instead of all being nadir.
             k = len(clusters)
             phi = k * golden
             horiz = np.cos(phi) * basis_u + np.sin(phi) * basis_v

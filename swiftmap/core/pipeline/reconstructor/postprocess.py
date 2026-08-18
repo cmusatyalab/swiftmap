@@ -1,24 +1,11 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""Backbone-agnostic post-processing shared by all mapper backends.
+"""Backbone-agnostic post-processing.
 
-Once a backbone has produced a *normalized* prediction dict (numpy arrays with
-``extrinsic``/``intrinsic``, a point field, ``images``, ``depth`` ...), the 3D
-export, PLY/GLB generation, and confidence-map generation are identical
-regardless of which model produced them. That shared logic lives here so each
-backend only implements load / preprocess / infer / decode.
-
-Normalized prediction schema (keys consumed downstream):
-    images                 (S, 3, H, W)
-    extrinsic              (S, 3, 4)      world-to-camera
-    intrinsic              (S, 3, 3)
-    world_points           (S, H, W, 3)   optional (dedicated point head)
-    world_points_conf      (S, H, W)      optional, pairs with world_points
-    world_points_from_depth(S, H, W, 3)   optional (unprojected depth)
-    depth / depth_conf     (S, H, W, 1)/(S, H, W)
-    camera_positions       (S, 3)
-    metadata               dict
-"""
+Once a backbone has normalized its predictions (numpy arrays with ``extrinsic``,
+``intrinsic``, a point field, ``images``, ``depth`` ...), the preview GLB, the saved
+``predictions.npz`` and the confidence map are identical whichever model produced them.
+Backends implement only load / preprocess / infer / decode."""
 
 import os
 import shutil

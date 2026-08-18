@@ -47,12 +47,10 @@ class KeyframeSelector:
             "processing_times": [],
         }
 
-        # Per-selected-keyframe priority value (the disparity that selected it), in
-        # selection order. Used by the session to cap the keyframe count by priority.
+        # The disparity that selected each keyframe, in order; the session caps by it.
         self.keyframe_values = []
 
-        # Optical-flow overlay (BGR) of the last *selected* keyframe, so the preview
-        # shows what was actually kept and holds steady between selections.
+        # Optical-flow overlay (BGR) of the last selected keyframe.
         self._keyframe_vis = None
 
     def is_keyframe(self, image: np.ndarray) -> bool:
@@ -67,8 +65,7 @@ class KeyframeSelector:
         """
         start = time.time()
         if self.keep_all:
-            # No selection -> every frame is kept; the preview is just the raw last
-            # frame added (no optical-flow overlay). Record 0.0 as the (unused) score.
+            # No selection: keep every frame and record 0.0 as the unused score.
             if self.visualize_flow:
                 self._keyframe_vis = image
             self._update_stats(time.time() - start, True)

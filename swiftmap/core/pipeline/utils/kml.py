@@ -83,8 +83,7 @@ def write_kml(viewpoints: List[Dict[str, Any]], path: str,
 
 
 # --- Polygon (area) KML -----------------------------------------------------
-# Google My Maps polygon layer whose ring vertices are the NFN target points, so
-# the plan reads as a coverage *area* rather than scattered pins.
+# Ring vertices are the NFN targets, so the plan reads as an area, not pins.
 _POLY_STYLE = """    <Style id="poly-000000-1200-77-nodesc-normal">
       <LineStyle>
         <color>ff000000</color>

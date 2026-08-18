@@ -113,8 +113,7 @@ class VGGTOmegaMapper(BaseMapper):
         predictions["extrinsic"] = extrinsic
         predictions["intrinsic"] = intrinsic
 
-        # To numpy, squeezing the leading batch dim (batch size 1), matching the
-        # Omega reference pipeline.
+        # To numpy, squeezing the leading batch dim, as the Omega reference does.
         processed: Dict[str, Any] = {}
         for key, value in predictions.items():
             if isinstance(value, torch.Tensor):
@@ -123,10 +122,7 @@ class VGGTOmegaMapper(BaseMapper):
             else:
                 processed[key] = value
 
-        # Omega has no point head: recover world points from depth and expose
-        # them under the standard keys so the exporter, confidence map, and NFN
-        # planner all work uniformly (same schema as VGGT's point head). Keep the
-        # explicit *_from_depth alias too for clarity/provenance.
+        # Omega has no point head: unproject depth into the standard world_points keys.
         world_points = _unproject_depth_map_to_point_map(
             processed["depth"], processed["extrinsic"], processed["intrinsic"])
         processed["world_points_from_depth"] = world_points

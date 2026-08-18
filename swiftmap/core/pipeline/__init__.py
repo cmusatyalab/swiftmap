@@ -1,2 +1,3 @@
 # Copyright (C) 2024 Carnegie Mellon University
-"""Pipeline stages: keyframe selection, mapping, segmentation, NFN, merge, GPS align."""
+"""Post-batch stages, each taking a stored ``Map``: reconstruction, GPS alignment,
+NFN planning, segmentation, plus the shared helpers in ``utils``."""

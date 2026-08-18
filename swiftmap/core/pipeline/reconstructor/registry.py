@@ -2,12 +2,9 @@
 
 """Backbone registry + factory.
 
-Each reconstruction backbone registers itself under a stable string key (e.g.
-``"vggt"``) together with a human-facing label and short description used to
-populate the model picker in the UI. ``get_mapper(name)`` builds the selected
-backbone. This is the single place SwiftMap chooses a model, so adding a new
-backbone is: implement ``BaseMapper``, decorate it with ``@register_mapper``.
-"""
+Each backbone registers under a stable key (``"vggt"``, ``"vggt_omega"``) with a label
+and description; ``get_mapper(name)`` builds it. Adding a backbone means importing its
+module -- no call site changes."""
 
 from typing import Callable, Dict, List, Type
 

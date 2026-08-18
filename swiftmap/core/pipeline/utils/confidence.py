@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # Copyright (C) 2024 Carnegie Mellon University
-"""
-Confidence-based 3D mapping utilities for Real-time Drone Next Flight Navigation (NFN).
-Generates confidence-colored point clouds to guide drone flight planning by identifying
-areas with poor map quality.
-"""
+"""Confidence-coloured point clouds: red = weak map, green = solid.
+
+Drives the viewer's confidence pane and the NFN quality read."""
 
 import numpy as np
 import matplotlib
@@ -87,10 +85,7 @@ def generate_confidence_point_cloud(
         }
         return empty_scene, stats
     
-    # Apply confidence threshold using percentile-based filtering (same as main 3D scene)
-    # conf_threshold is expected to be a decimal (0.0-1.0) representing percentile
-    # e.g., 0.6 means keep top 40% of points (filter bottom 60%)
-    # conf_threshold is a decimal (0-1); geometry.confidence_mask takes a percentile.
+    # conf_threshold is a decimal (0-1); confidence_mask takes a percentile.
     high_conf_mask = arrays.confidence_mask(confidence, conf_threshold * 100)
     filtered_points = world_points[high_conf_mask]
     filtered_conf = confidence[high_conf_mask]
@@ -120,8 +115,7 @@ def generate_confidence_point_cloud(
     # Generate colors based on confidence
     colors = confidence_to_colors(filtered_conf)
     
-    # Flip the point cloud coordinates to match GLB transformation
-    # This fixes the "upside down" issue in the confidence viewer
+    # Flip Y/Z so the cloud is right-side up in the viewer.
     flipped_points = filtered_points.copy()
     flipped_points[:, 2] = -flipped_points[:, 2]  # Flip Z coordinate
     # Or alternatively flip Y coordinate if Z doesn't work:
@@ -137,8 +131,6 @@ def generate_confidence_point_cloud(
     scene = trimesh.Scene()
     scene.add_geometry(point_cloud, node_name="confidence_points")
     
-    # Camera setup is now handled by Gradio Model3D camera_position parameter
-    # The coordinate flip above should resolve the orientation mismatch
     
     # Calculate statistics
     stats = {

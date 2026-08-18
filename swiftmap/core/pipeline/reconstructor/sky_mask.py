@@ -1,9 +1,7 @@
 # Copyright (C) 2024 Carnegie Mellon University
-"""Sky segmentation (skyseg.onnx) used to zero confidence on sky pixels.
+"""Sky segmentation (skyseg.onnx): zeroes confidence on sky pixels before a preview.
 
-Preprocessing/masking, kept apart from scene export. Model courtesy of
-https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing.
-"""
+Model courtesy of https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing."""
 
 import copy
 import os

@@ -70,8 +70,7 @@ class MappingTCPServer:
             "last_frame_time": None
         }
         
-        # Keyframe storage. A session-owned temp_dir is reused across start/stop so
-        # keyframes survive a Stop; a self-created one is cleaned up on stop.
+        # A session-owned temp_dir survives a stop; a self-created one is cleaned up.
         if temp_dir:
             self.temp_dir = temp_dir
             self._owns_temp_dir = False
@@ -167,8 +166,7 @@ class MappingTCPServer:
             bool: True if sent successfully
         """
         try:
-            # Reply as 3 float64 (see protocol): status, keyframe_count, total_frames,
-            # plus any one-shot outbound payload (e.g. an NFN area KML) piggybacked here.
+            # 3 float64 status header plus any one-shot payload (e.g. the NFN area KML).
             kf, total = self.total_keyframes_selected, self.total_frames_received
             payload = self._take_outbound()
             if status_code == "keyframe_selected":
@@ -320,9 +318,7 @@ class MappingTCPServer:
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._bind_with_retry()
             self.server_socket.listen(5)
-            # Time out accept() so the loop periodically checks is_running -- this lets
-            # stop() release the port promptly instead of blocking in accept(), which
-            # is what caused "Address already in use" on a quick restart.
+            # Time out accept() so stop() can release the port promptly.
             self.server_socket.settimeout(1.0)
 
             self.is_running = True
@@ -389,8 +385,7 @@ class MappingTCPServer:
         for thread in self.client_threads:
             thread.join(timeout=1.0)
 
-        # Only clean up a temp dir we created ourselves. A session-owned dir is left
-        # intact so collected keyframes survive a Stop (the session manages its life).
+        # Only remove a temp dir we created; a session-owned one outlives us.
         if self._owns_temp_dir and hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
             import shutil
             try:

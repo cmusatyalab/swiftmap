@@ -1,27 +1,16 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""
-Mapping Session
+"""The mapping session: the one gateway between the server and the core.
 
-The orchestration layer for one mapping run. A ``MappingSession`` is the single
-middle layer between the server and the core stages — it owns and coordinates
-all of them:
+It owns the transport (TCP ingest + keyframe selection), the reconstruction backbone,
+the GPS aligner, the NFN planner, and the map database. A run goes:
 
-    collection :  MappingTCPServer + KeyframeSelector (transport: ingest + decision)
-    mapping    :  VGGTMapper       (reconstruction + confidence)
-    alignment  :  GpsTransformer   (local -> GPS)
-    planning   :  NextFlightPlanner (NFN)
+    drone --TCP--> _on_frame -> selector.is_keyframe          collect
+    new_map() -> reconstruct() -> align_gps() -> plan()       map
+    grow_site() / render_map() / segment_map()                store and serve
 
-The pipeline for a run:
-
-    drone --TCP--> tcp_server --frame--> _on_frame -> selector.is_keyframe   (collect)
-    reconstruct() -> mapper.process_keyframes(<collected keyframes>)         (map)
-    plan()                                                                   (evaluate + replan)
-
-The server drives the session (start/stop, reconstruct, plan, export) and reads
-state from it; it never touches sockets, the model, or the planner directly. The
-session is long-lived — created once — so the (expensive) VGGT model persists
-across capture start/stop cycles. ``start(port, …)`` controls only the transport.
+The session is long-lived, so the (expensive) model survives capture start/stop cycles;
+``start(port, ...)`` controls only the transport.
 """
 
 import os
@@ -56,13 +45,12 @@ class MappingSession:
                  site: str = "map"):
         self.host = host
 
-        # The map database this session reads and writes (results root).
+        # The results root this session reads and writes.
         self.db = Database(root or os.getcwd(), site)
 
-        # Core stages (all long-lived; the model loads lazily on first reconstruct).
+        # Long-lived stages; the model loads lazily on first reconstruct.
         self.selector = KeyframeSelector(min_disparity=min_disparity)
-        # The reconstruction backbone is chosen at runtime (VGGT / VGGT-Omega /
-        # ...): no mapper exists until the user selects one via set_backbone().
+        # Chosen at runtime: there is no mapper until set_backbone().
         self.backbone: Optional[str] = None
         self.mapper = None
         self.planner = NextFlightPlanner()
@@ -76,28 +64,21 @@ class MappingSession:
         # Latest NFN plan (set by plan(); used by export).
         self.latest_plan = None
 
-        # Live keyframe cap: at most this many keyframes are retained during
-        # collection. With keyframe selection, an incoming frame replaces the
-        # lowest-disparity one only if it scores higher; without selection the cap is a
-        # FIFO window (keep the newest). 0 disables the cap.
+        # A new frame evicts the lowest-disparity one only if it scores higher; 0 disables.
         self.max_keyframes = constants.DEFAULT_MAX_KEYFRAMES
 
         # Transport is created on start() (its port is chosen then).
         self.tcp_server: Optional[MappingTCPServer] = None
         self.port: Optional[int] = None
 
-        # Session-owned scratch dir, reused across start/stop so keyframes survive a
-        # Stop (a fresh start() wipes it). The TCP server writes keyframe JPEGs here.
+        # Scratch dir for keyframe JPEGs; survives a stop, wiped by the next start().
         self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_session_")
-        # Live GPS trace, rewritten to mirror the retained keyframes so the UI shows
-        # "a GPS file is present" like a user upload and it stays 1:1 with them.
+        # Live GPS trace, rewritten to stay 1:1 with the retained keyframes.
         self.stream_gps_csv_path = os.path.join(self.temp_dir, "stream_gps.csv")
         self._stream_gps_rows = 0
         self._gps_csv_lock = threading.Lock()
 
-        # Bounded priority buffer of retained keyframes. Each entry:
-        #   {"seq": capture index, "score": disparity, "path": jpeg, "gps": (lat,lon,alt)|None}
-        # Kept unordered; read back sorted by "seq" (capture order). Guarded by the lock.
+        # Retained keyframes {"seq", "score", "path", "gps"}, read back sorted by "seq".
         self._buffer: List[Dict[str, Any]] = []
         self._seq = 0             # running capture index of selected keyframes
         self._total_selected = 0  # keyframes ever selected (for stats)
@@ -178,8 +159,7 @@ class MappingSession:
         """
         is_keyframe = self.selector.is_keyframe(image)
         if is_keyframe:
-            # Priority recorded by the selector: disparity, +inf for anchor/forced
-            # keyframes, 0.0 for keep-all. Carried in metadata to the drain step.
+            # Selector priority: disparity, +inf for anchors, 0.0 for keep-all.
             metadata["score"] = float(self.selector.keyframe_values[-1])
         return is_keyframe
 
@@ -527,7 +507,7 @@ class MappingSession:
         return cfg
 
     def align_gps(self, use_icp: bool, gps_csv_path: Optional[str] = None) -> Dict[str, Any]:
-        """Unified GPS alignment entry point used by the UI.
+        """Unified GPS alignment entry point.
 
         Resolves the GPS source, then aligns the reconstruction's camera trajectory:
 

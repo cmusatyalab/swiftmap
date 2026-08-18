@@ -84,8 +84,7 @@ def export_highlight_glb(predictions: Dict[str, Any], masks: np.ndarray,
     seg = masks.astype(bool).reshape(-1)
     keep = np.isfinite(flat_pts).all(-1) & _confidence_keep(predictions, conf_thres).reshape(-1)
 
-    # Keep the full confidence-passing background (no decimation) so the cloud
-    # matches the reconstruction viewer exactly — only the coloring differs.
+    # Keep the full background so this matches the reconstruction view, recoloured.
     seg_idx = np.where(seg & keep)[0]
     bg_idx = np.where(~seg & keep)[0]
     if len(seg_idx) == 0:

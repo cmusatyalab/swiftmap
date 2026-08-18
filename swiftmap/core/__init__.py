@@ -1,14 +1,7 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""
-SwiftMap core components:
-
-- Mapping session orchestrator (TCP transport + keyframe selection + backbones)
-- TCP server for drone frame+GPS reception
-- Optical-flow keyframe selection
-- Pluggable reconstruction backbones (VGGT / VGGT-Omega)
-- Next Flight Navigation (NFN) planning
-"""
+"""SwiftMap core: the session gateway, TCP transport + keyframe selection, the map
+database, and the pipeline stages."""
 
 from swiftmap.core.session import MappingSession
 from swiftmap.core.transport.tcp_server import MappingTCPServer

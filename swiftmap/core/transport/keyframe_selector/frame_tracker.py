@@ -30,12 +30,9 @@ class FrameTracker:
         self.kf_pts = None
         self.kf_gray = None
         self.frame_count = 0
-        # Disparity (motion vs. previous keyframe) of the most recent selection,
-        # used as a priority value when capping the keyframe count. Forced keyframes
-        # (the first frame / reinitializations) get +inf so they're always kept.
+        # Disparity of the last selection, used as its priority; forced ones get +inf.
         self.last_disparity = 0.0
-        # Latest optical-flow overlay (BGR) built when visualization is enabled, so
-        # the UI can show a live "what the selector sees" preview. None until drawn.
+        # Optical-flow overlay (BGR) when visualization is on; None until drawn.
         self.last_flow_vis = None
 
         # Feature detection parameters
@@ -139,7 +136,7 @@ class FrameTracker:
             mean_disparity = np.mean(displacement)
             self.last_disparity = float(mean_disparity)
             
-            # Optional visualization -> cache the annotated frame for the UI preview
+            # Optional visualization: cache the annotated frame.
             if visualize:
                 self.last_flow_vis = self._visualize_optical_flow(
                     image, good_kf, good_next, mean_disparity, min_disparity)
@@ -181,8 +178,7 @@ class FrameTracker:
         try:
             vis = image.copy()
 
-            # Draw optical flow vectors. Red once motion crosses the threshold
-            # (this frame becomes a keyframe), green while still below it.
+            # Red once motion crosses the threshold, green while below it.
             is_kf = mean_disparity > min_disparity
             color = (0, 0, 255) if is_kf else (0, 255, 0)
             for p1, p2 in zip(good_kf, good_next):
