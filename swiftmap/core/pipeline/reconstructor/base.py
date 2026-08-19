@@ -20,6 +20,7 @@ import torch
 from swiftmap.database.map import Map
 from swiftmap.database.types import PointCloud
 from swiftmap.core.pipeline.reconstructor import postprocess
+from swiftmap.core import constants
 
 
 class BaseReconstructor(ABC):
@@ -36,7 +37,7 @@ class BaseReconstructor(ABC):
         self.default_params = {
             "mask_sky": True,
             "mask_dynamic": False,
-            "conf_threshold": 60.0,
+            "conf_threshold": constants.DEFAULT_CONF_THRESHOLD,
             "mask_black_bg": False,
             "mask_white_bg": False,
             "show_cam": True,

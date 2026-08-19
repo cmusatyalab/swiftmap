@@ -18,6 +18,9 @@ from swiftmap.core.pipeline.reconstructor.pose import camera_poses_from_extrinsi
 _SKY_MASK_THRESHOLD = 0.1
 _MAX_CONFIDENCE_POINTS = 50000
 _CONF_EPSILON = 1e-6
+_FRUSTUM_SCALE = 0.1
+_FRUSTUM_ALPHA = 70
+_SCENE_SCALE_PERCENTILES = (5, 95)
 
 
 def generate_3d_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -32,22 +35,18 @@ def generate_3d_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
         xyz, conf, keep = _flatten_valid(params["conf_threshold"], pts, conf)
         xyz, conf = xyz[keep], conf[keep]
         cols = pt.flatten_colors()[keep]
-        xyz[:, 1:] *= -1
-
-        frames = []
-        if params.get("show_cam") and pt.extrinsic is not None:
-            positions, rotations = camera_poses_from_extrinsics(pt.extrinsic)
-            for p, R in zip(positions, rotations):
-                p[1:] *= -1
-                R[1:, :] *= -1
-                frames.append({"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()})
 
         scene = trimesh.Scene()
         geometry = trimesh.PointCloud(vertices=xyz, colors=cols)
         scene.add_geometry(geometry, geom_name="points")
-        if frames and len(xyz):
-            size = float(np.clip(np.linalg.norm(xyz.max(0) - xyz.min(0)) * 0.01, 1.0, 5.0))
-            scene.add_geometry(_camera_frustums(frames, size, (20, 20, 20, 255)), geom_name="cameras")
+        if params.get("show_cam") and pt.extrinsic is not None and len(xyz):
+            positions, rotations = camera_poses_from_extrinsics(pt.extrinsic)
+            frames = [{"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()}
+                      for p, R in zip(positions, rotations)]
+            lo, hi = np.percentile(xyz, _SCENE_SCALE_PERCENTILES, axis=0)
+            size = float(np.linalg.norm(hi - lo) * _FRUSTUM_SCALE)
+            scene.add_geometry(_camera_frustums(frames, size), geom_name="cameras")
+        _align_scene(scene, pt.extrinsic)
         pt.scene = scene
 
         print(f"3D scene generated: {len(xyz)} points")
@@ -56,12 +55,15 @@ def generate_3d_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
         print(f"Error generating 3D content: {e}")
         return {"error": str(e)}
 
-def _camera_frustums(frames, size: float, rgba):
-    """One Trimesh of camera-frustum pyramids for frames."""
+def _camera_frustums(frames, size: float):
+    """One translucent Trimesh of camera-frustum pyramids, rainbow-colored by index."""
+    import colorsys
+    from trimesh.visual.material import PBRMaterial
     corners = np.array([[-0.5, -0.375, 1.0], [0.5, -0.375, 1.0],
                         [0.5, 0.375, 1.0], [-0.5, 0.375, 1.0]])
     verts = np.zeros((len(frames) * 5, 3))
     faces = np.zeros((len(frames) * 4, 3), dtype=np.int64)
+    colors = np.zeros((len(frames) * 4, 4), dtype=np.uint8)
     for k, fr in enumerate(frames):
         r = np.asarray(fr["rotation_matrix"], float)
         c = np.asarray(fr["camera_position_world"], float)
@@ -71,9 +73,24 @@ def _camera_frustums(frames, size: float, rgba):
         verts[vb + 1:vb + 5] = base
         for i in range(4):
             faces[4 * k + i] = [vb, vb + 1 + i, vb + 1 + (i + 1) % 4]
+        rgb = colorsys.hsv_to_rgb(k / max(len(frames), 1), 1.0, 1.0)
+        colors[4 * k:4 * k + 4] = [int(255 * v) for v in rgb] + [255]
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    mesh.visual.face_colors = np.tile(np.asarray(rgba, np.uint8), (len(faces), 1))
+    mesh.visual = trimesh.visual.ColorVisuals(mesh=mesh, face_colors=colors)
+    mesh.visual.material = PBRMaterial(baseColorFactor=[255, 255, 255, _FRUSTUM_ALPHA],
+                                       alphaMode="BLEND", doubleSided=True)
     return mesh
+
+
+def _align_scene(scene: trimesh.Scene, extrinsic):
+    """Align to the first camera's view, with the OpenGL axis flip (VGGT convention)."""
+    if extrinsic is None or not len(extrinsic):
+        return
+    first = np.eye(4)
+    first[:3, :4] = np.asarray(extrinsic)[0]
+    opengl = np.diag([1.0, -1.0, -1.0, 1.0])
+    align_y180 = np.diag([-1.0, 1.0, -1.0, 1.0])
+    scene.apply_transform(np.linalg.inv(first) @ opengl @ align_y180)
 
 
 def generate_confidence_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -103,11 +120,10 @@ def generate_confidence_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any
             idx = np.random.choice(len(xyz), _MAX_CONFIDENCE_POINTS, replace=False)
             xyz, conf = xyz[idx], conf[idx]
 
-        xyz = xyz.copy()
-        xyz[:, 1:] *= -1
         scene = trimesh.Scene()
         scene.add_geometry(trimesh.points.PointCloud(vertices=xyz, colors=_confidence_to_colors(conf)),
                           node_name="confidence_points")
+        _align_scene(scene, pt.extrinsic)
         pt.confidence_scene = scene
 
         print(f"Confidence mapping generated: {stats['high_conf_points']}/{stats['total_points']} "
