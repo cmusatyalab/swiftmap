@@ -25,19 +25,22 @@ def generate_3d_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
     try:
         print("Generating 3D content...")
         pt = map.get_pointcloud()
-        pts, conf = pt.world_points, pt.world_points_confs
+        pts, conf = pt.world_points, pt.world_points_conf
 
         if params.get("mask_sky"):
             conf = _apply_sky_mask(map)
-        xyz, conf, keep = _flatten_valid(params["conf_threshold"], pt, conf=conf)
+        xyz, conf, keep = _flatten_valid(params["conf_threshold"], pts, conf)
         xyz, conf = xyz[keep], conf[keep]
         cols = pt.flatten_colors()[keep]
+        xyz[:, 1:] *= -1
 
         frames = []
         if params.get("show_cam") and pt.extrinsic is not None:
             positions, rotations = camera_poses_from_extrinsics(pt.extrinsic)
-            frames = [{"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()}
-                     for p, R in zip(positions, rotations)]
+            for p, R in zip(positions, rotations):
+                p[1:] *= -1
+                R[1:, :] *= -1
+                frames.append({"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()})
 
         scene = trimesh.Scene()
         geometry = trimesh.PointCloud(vertices=xyz, colors=cols)
@@ -78,11 +81,11 @@ def generate_confidence_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any
     try:
         print("Generating confidence mapping...")
         pt = map.get_pointcloud()
-        pts, conf = pt.world_points, pt.world_points_confs
+        pts, conf = pt.world_points, pt.world_points_conf
         if pts is None:
             return {"error": "No world points or depth available in predictions"}
 
-        xyz, conf, keep = _flatten_valid(params["conf_threshold"], pt)
+        xyz, conf, keep = _flatten_valid(params["conf_threshold"], pts, conf)
         xyz, conf = xyz[keep], conf[keep]
         stats = {
             "total_points": int(keep.size),
@@ -162,11 +165,30 @@ def generate_camera_poses(map: Map, params: Dict[str, Any]) -> Optional[Dict[str
     return poses_data
 
 
-def _flatten_valid(percentile: float, pt: PointCloud, conf=None):
+def generate_model_input(map: Map) -> Optional[list]:
+    """Encode the model-resolution input frames as JPEGs and attach as pt.model_input."""
+    import cv2
+    pt = map.get_pointcloud()
+    if pt is None or pt.images is None:
+        return None
+
+    images = np.asarray(pt.images)
+    if images.ndim == 4 and images.shape[1] == 3:
+        images = np.transpose(images, (0, 2, 3, 1))
+    images = (np.clip(images, 0.0, 1.0) * 255).astype(np.uint8)
+
+    encoded = []
+    for i, img in enumerate(images):
+        ok, buf = cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        if ok:
+            encoded.append((f"frame_{i:06d}.jpg", buf.tobytes()))
+    pt.model_input = encoded
+    return encoded
+
+
+def _flatten_valid(percentile: float, pts, conf):
     """Flatten points/conf and mask to finite points at/above the confidence percentile."""
-    xyz = np.asarray(pt.world_points).reshape(-1, 3)
-    if conf is None:
-        conf = pt.world_points_conf
+    xyz = np.asarray(pts).reshape(-1, 3)
     conf = np.asarray(conf, dtype=float).reshape(-1)
 
     keep = np.isfinite(xyz).all(1) & (conf > _CONF_EPSILON)

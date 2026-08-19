@@ -42,14 +42,13 @@ class Database:
     def create_site(self, created: datetime = None) -> Site:
         """Create the site map under ``site/`` for the first time."""
 
-    def create_map(self, created: datetime = None,
-                   keyframe_paths: Optional[List[str]] = None) -> Map:
+    def create_map(self, created: datetime = None) -> Map:
         """Create an empty map under ``maps/`` for a run to write into."""
         created = created or datetime.now()
         tag = f"map_{created.strftime('%Y%m%d_%H%M%S_%f')}"
         path = os.path.join(self.maps_dir, tag)
         os.makedirs(path, exist_ok=True)
-        return Map(name=tag, path=path, keyframe_paths=keyframe_paths)
+        return Map(name=tag, path=path)
 
     def grow_site(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
                   created: datetime = None) -> Site:

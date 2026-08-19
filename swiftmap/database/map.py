@@ -30,10 +30,9 @@ class MapMeta:
 class Map:
     """An on-disk map directory (tag + path) with load/render/segment/merge I/O."""
 
-    def __init__(self, name, path, keyframe_paths: Optional[List[str]] = None):
-        self.meta = MapMeta(name=name, path=path, site=None, created_time=datetime.now(),
-                            num_keyframes=len(keyframe_paths or []))
-        self._keyframe_paths = keyframe_paths or []
+    def __init__(self, name, path):
+        self.meta = MapMeta(name=name, path=path, site=None, created_time=datetime.now())
+        os.makedirs(self.images_dir, exist_ok=True)
 
         # optional
         self.reconstructed_results: PointCloud = None
@@ -45,8 +44,15 @@ class Map:
     def path(self) -> str:
         return self.meta.path
 
+    @property
+    def images_dir(self) -> str:
+        return os.path.join(self.path, "images")
+
     def get_keyframe_paths(self) -> List[str]:
-        return self._keyframe_paths
+        """This map's keyframe JPEGs under images/, in capture order."""
+        if not os.path.isdir(self.images_dir):
+            return []
+        return [os.path.join(self.images_dir, n) for n in sorted(os.listdir(self.images_dir))]
 
     def get_pointcloud(self) -> PointCloud:
         return self.reconstructed_results
@@ -73,8 +79,15 @@ class Map:
             pt.scene.export(os.path.join(self.path, "scene.glb"))
 
         if pt.confidence_scene is not None:
-            pt.confidence_scene.export(os.path.join(self.path, "confidence_map.glb"))
+            pt.confidence_scene.export(os.path.join(self.path, "scene_confidence.glb"))
 
         if pt.camera_poses is not None:
             with open(os.path.join(self.path, "camera_poses.json"), "w") as f:
                 json.dump(pt.camera_poses, f, indent=2)
+
+        if pt.model_input is not None:
+            model_input_dir = os.path.join(self.path, "model_input")
+            os.makedirs(model_input_dir, exist_ok=True)
+            for name, data in pt.model_input:
+                with open(os.path.join(model_input_dir, name), "wb") as f:
+                    f.write(data)

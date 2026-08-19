@@ -5,7 +5,7 @@ TCP Server for SwiftMap Mapping System
 
 Receives frame+GPS pairs from a drone client over TCP. Each frame is checked against
 ``keyframe_selector``; keyframes are saved to disk and appended to the open batch. Once
-the batch reaches ``batch_size`` it is queued, ready for ``next_batch()`` to hand to a
+the batch reaches ``batch_size`` it is queued, ready for ``next_map()`` to hand to a
 reconstruction worker. The wire format lives in ``swiftmap.core.transport.protocol``.
 """
 
@@ -21,18 +21,20 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 from swiftmap.core.transport import protocol
+from swiftmap.database.map import Map
 
 
-class MappingTCPServer:
-    """Receives drone frames over TCP, selects keyframes, and batches them for reconstruction."""
+class Transporter:
+    """Receives drone frames over TCP, selects keyframes, and batches them into a Map for reconstruction."""
 
-    def __init__(self, keyframe_selector, batch_size: int,
+    def __init__(self, keyframe_selector, batch_size: int, db,
                  host: str = "0.0.0.0", port: int = protocol.TCP_PORT,
                  temp_dir: Optional[str] = None):
         """
         Args:
             keyframe_selector: decides ``is_keyframe(image)`` for each received frame.
             batch_size: keyframes per batch; a batch is queued the moment it fills.
+            db: ``Database`` used to create the ``Map`` a closed batch becomes.
             host, port: where to listen.
             temp_dir: directory for keyframe JPEGs. If given (session-owned), it is
                       not deleted on stop. If None, the server creates and owns one.
@@ -41,6 +43,7 @@ class MappingTCPServer:
         self.port = port
         self.keyframe_selector = keyframe_selector
         self.batch_size = batch_size
+        self.db = db
 
         # Server state
         self.server_socket = None
@@ -68,15 +71,8 @@ class MappingTCPServer:
         self._batch_lock = threading.Lock()
         self._batches: "queue.Queue" = queue.Queue()
 
-        # A session-owned temp_dir survives a stop; a self-created one is cleaned up.
-        if temp_dir:
-            self.temp_dir = temp_dir
-            self._owns_temp_dir = False
-            os.makedirs(self.temp_dir, exist_ok=True)
-        else:
-            import tempfile
-            self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_")
-            self._owns_temp_dir = True
+        self.temp_dir = temp_dir
+        os.makedirs(self.temp_dir, exist_ok=True)
 
     # ===================================================================== lifecycle
     def start_server(self):
@@ -121,7 +117,7 @@ class MappingTCPServer:
 
 
     def stop_server(self):
-        """Stop the TCP server, unblock a worker waiting on next_batch(), clean up."""
+        """Stop the TCP server, unblock a worker waiting on next_map(), clean up."""
         print("Stopping SwiftMap Mapping TCP Server...")
         self.is_running = False
 
@@ -131,16 +127,7 @@ class MappingTCPServer:
         for thread in self.client_threads:
             thread.join(timeout=1.0)
 
-        self._batches.put(None)  # unblock next_batch()
-
-        # Only remove a temp dir we created; a session-owned one outlives us.
-        if self._owns_temp_dir and hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
-            import shutil
-            try:
-                shutil.rmtree(self.temp_dir)
-                print(f"Cleaned up temporary directory: {self.temp_dir}")
-            except Exception as e:
-                print(f"Warning: Could not clean temp directory: {e}")
+        self._batches.put(None)  # unblock next_map()
 
         print("SwiftMap Mapping TCP Server stopped")
         self.print_final_stats()
@@ -316,25 +303,28 @@ class MappingTCPServer:
             return ""
 
     def _add_to_batch(self, path: str, gps):
-        """Append to the open batch; queue it for a worker once it reaches batch_size."""
+        """Append to the open batch; once full, close it into a Map and queue that."""
         with self._batch_lock:
             self._batch.append({"path": path, "gps": gps})
             if len(self._batch) < self.batch_size:
                 return
             batch, self._batch = self._batch, []
-        self._batches.put(batch)
+        self._batches.put(self._close_batch(batch))
 
-    def next_batch(self):
-        """Block until a batch is ready. Returns None once ``stop_server`` unblocks it."""
-        return self._batches.get()
-
-    def release_batch(self, batch: List[Dict[str, Any]]):
-        """Delete a finished batch's JPEGs."""
-        for e in batch:
+    def _close_batch(self, batch: List[Dict[str, Any]]) -> Map:
+        """Create the batch's Map and move its keyframes into the map's images/."""
+        map_ = self.db.create_map()
+        for i, e in enumerate(batch):
+            dst = os.path.join(map_.images_dir, f"frame_{i:06d}.jpg")
             try:
-                os.remove(e["path"])
-            except OSError:
-                pass
+                os.replace(e["path"], dst)
+            except OSError as err:
+                print(f"Error moving keyframe {e['path']} -> {dst}: {err}")
+        return map_
+
+    def next_map(self) -> Optional[Map]:
+        """Block until a Map is ready. Returns None once ``stop_server`` unblocks it."""
+        return self._batches.get()
 
     # ========================================================================= stats
     def get_keyframe_count(self) -> int:
@@ -368,7 +358,7 @@ class MappingTCPServer:
 if __name__ == "__main__":
     from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 
-    server = MappingTCPServer(keyframe_selector=KeyframeSelector(), batch_size=5)
+    server = Transporter(keyframe_selector=KeyframeSelector(), batch_size=5)
 
     try:
         if server.initialize():

@@ -5,12 +5,12 @@
 It owns the transport (TCP ingest + keyframe selection), the reconstruction backbone,
 the GPS aligner, the NFN planner, and the map database. A run goes:
 
-    drone --TCP--> MappingTCPServer selects, batches      collect (socket thread)
-    worker thread: next_batch() -> reconstruct() -> align_gps() -> plan()   map
+    drone --TCP--> Transporter selects, batches      collect (socket thread)
+    worker thread: next_map() -> reconstruct() -> align_gps() -> plan()   map
     segment_map()                                          serve
 
 The TCP server owns selection and batching; the session just owns the socket thread
-that runs it and a worker thread that blocks on ``next_batch()`` and maps each one.
+that runs it and a worker thread that blocks on ``next_map()`` and maps each one.
 
 The session is long-lived, so the (expensive) model survives capture start/stop cycles;
 ``start(port, ...)`` controls only the transport.
@@ -25,13 +25,14 @@ import numpy as np
 
 from swiftmap.core import constants
 from swiftmap.database import Database
+from swiftmap.database.map import Map
 from swiftmap.core.transport import protocol
 from swiftmap.core.transport.keyframe_selector import KeyframeSelector
-from swiftmap.core.transport.tcp_server import MappingTCPServer
+from swiftmap.core.transport.transporter import Transporter
 from swiftmap.core.pipeline.reconstructor import get_reconstructor
-from swiftmap.core.pipeline.segmentor import get_segmenter, lift
-from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner
-from swiftmap.core.pipeline.gps_transformer import GpsTransformer
+# from swiftmap.core.pipeline.segmentor import get_segmenter, lift  # broken, not needed to start the session
+# from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner  # broken, not needed to start the session
+# from swiftmap.core.pipeline.gps_transformer import GpsTransformer  # not needed to start the session
 
 
 class MappingSession:
@@ -51,14 +52,14 @@ class MappingSession:
         # pipeline stages
         self.backbone: Optional[str] = None
         self.reconstructor = get_reconstructor(backbone[0])
-        self.segmenter = get_segmenter(backbone[1])
-        self.planner = NextFlightPlanner()
-        self.aligner = GpsTransformer()
+        self.segmenter = None  # get_segmenter(backbone[1])  # broken, not needed to start the session
+        self.planner = None  # NextFlightPlanner()  # broken, not needed to start the session
+        self.aligner = None  # GpsTransformer()  # not needed to start the session
 
         # transport
         self.batch_size = constants.DEFAULT_MAX_KEYFRAMES  # a batch closes at this size
         self.selector = KeyframeSelector(min_disparity=min_disparity)
-        self.tcp_server: Optional[MappingTCPServer] = None
+        self.transporter: Optional[Transporter] = None
         self.port: Optional[int] = None
         self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_session_")  # scratch dir for keyframe JPEGs
 
@@ -84,15 +85,15 @@ class MappingSession:
             self.selector.keep_all = keep_all
 
         self.port = port
-        self.tcp_server = MappingTCPServer(self.selector, self.batch_size,
-                                           host=self.host, port=port,
-                                           temp_dir=self.temp_dir)
+        self.transporter = Transporter(self.selector, self.batch_size, self.db,
+                                       host=self.host, port=port,
+                                       temp_dir=self.temp_dir)
 
         print("Starting SwiftMap Mapping Session...")
         print(f"Server: {self.host}:{port} | min disparity: {self.selector.min_disparity} px, batch size: {self.batch_size}, keep_all: {self.selector.keep_all}")
 
         self.start_time = datetime.now()
-        self.transport_thread = threading.Thread(target=self.tcp_server.start_server, daemon=True)
+        self.transport_thread = threading.Thread(target=self.transporter.start_server, daemon=True)
         self.transport_thread.start()
 
         self.pipeline_thread = threading.Thread(target=self._worker_loop, daemon=True)
@@ -108,8 +109,8 @@ class MappingSession:
             return
         print("Stopping SwiftMap Mapping Session...")
         self.is_running = False
-        if self.tcp_server:
-            self.tcp_server.stop_server()
+        if self.transporter:
+            self.transporter.stop_server()
         if self.transport_thread:
             self.transport_thread.join(timeout=2.0)
         if self.pipeline_thread:
@@ -117,38 +118,28 @@ class MappingSession:
         print("Mapping session stopped")
 
     def _worker_loop(self):
-        """Block on the next full batch and map it, forever (until stop() unblocks it)."""
+        """Block on the next full Map and reconstruct it, until stop() unblocks it."""
         while True:
-            batch = self.tcp_server.next_batch()
-            if batch is None:
+            map_ = self.transporter.next_map()
+            if map_ is None:
                 break
-            try:
-                result = self.reconstruct(batch, {})
-                if not result.get("success"):
-                    print(f"Reconstruction failed: {result.get('error')}")
-                    continue
-                # TODO: deferred -- align_gps()/plan() don't exist on MappingSession yet.
-            finally:
-                self.tcp_server.release_batch(batch)
+            result = self.reconstruct(map_, {})
+            if not result.get("success"):
+                print(f"Reconstruction failed: {result.get('error')}")
+            # TODO: deferred -- align_gps()/plan() don't exist on MappingSession yet.
 
     # ============================================================ helper
     def send_to_client(self, payload: bytes):
         """Deliver payload back to the connected client"""
-        if self.tcp_server:
-            self.tcp_server.queue_outbound(payload)
+        if self.transporter:
+            self.transporter.queue_outbound(payload)
 
     # =============================================================== pipeline stage
 
     # ---------------------------------------------------------------- reconstruction
-    def reconstruct(self, batch: List[Dict[str, Any]],
-                    params: Dict[str, Any]) -> Dict[str, Any]:
-        """Run reconstruction on one closed batch (from ``tcp_server.next_batch()``)."""
-        paths = [e["path"] for e in batch]
-        if not paths:
-            return {"success": False, "error": "No keyframes collected yet",
-                    "keyframe_count": 0}
-        print(f"Reconstructing {len(paths)} keyframes (batch_size={self.batch_size})")
-        map_ = self.db.create_map(keyframe_paths=paths)
+    def reconstruct(self, map_: Map, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run reconstruction on one closed Map (from ``transporter.next_map()``)."""
+        print(f"Reconstructing {map_.meta.name} (batch_size={self.batch_size})")
         return self.reconstructor.run(map_, params)
     # ---------------------------------------------------------------- planning
 
@@ -161,9 +152,9 @@ class MappingSession:
     def get_stats(self) -> Dict[str, Any]:
         """Combined session statistics (selection + transport)."""
         stats = self.selector.get_stats()
-        if self.tcp_server:
-            stats["tcp_server_stats"] = self.tcp_server.get_stats()
-            stats["keyframes_selected"] = self.tcp_server.total_keyframes_selected
+        if self.transporter:
+            stats["transporter_stats"] = self.transporter.get_stats()
+            stats["keyframes_selected"] = self.transporter.total_keyframes_selected
         if self.start_time:
             stats["session_duration"] = str(datetime.now() - self.start_time)
         return stats

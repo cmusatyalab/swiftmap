@@ -118,6 +118,9 @@ class BaseReconstructor(ABC):
             postprocess.generate_camera_poses(map, params)
             poses_time = time.time() - poses_start
 
+            # update model_input
+            postprocess.generate_model_input(map)
+
             # write to disk
             map.write2disk()
             total_processing_time = time.time() - processing_start

@@ -17,7 +17,7 @@ DEFAULT_MAX_KEYFRAMES = 70
 # --- Reconstruction / confidence -------------------------------------------
 # Confidence threshold (percentile, %) used when filtering the point cloud.
 DEFAULT_CONF_THRESHOLD = 60.0
-DEFAULT_RECONSTRUCTOR = os.environ.get("SWIFTMAP_RECONSTRUCTOR", "vggt-omega")
+DEFAULT_RECONSTRUCTOR = os.environ.get("SWIFTMAP_RECONSTRUCTOR", "vggt_omega")
 # Model asset URLs 
 VGGT_MODEL_URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
 SKYSEG_ONNX_URL = "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx"

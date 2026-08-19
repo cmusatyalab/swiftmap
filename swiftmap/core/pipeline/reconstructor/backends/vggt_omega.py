@@ -110,14 +110,15 @@ class VGGTOmegaReconstructor(BaseReconstructor):
             else:
                 processed[key] = value
 
-        # Omega has no point head: unproject depth into world_points_from_depth;
-        # PointCloud.points_and_conf() falls back to it when world_points is unset.
-        world_points_from_depth = _unproject_depth_map_to_point_map(
+        # Omega has no point head: unproject depth into world points instead.
+        world_points = _unproject_depth_map_to_point_map(
             processed["depth"], processed["extrinsic"], processed["intrinsic"])
 
         positions, rotations = camera_poses_from_extrinsics(processed["extrinsic"])
         return PointCloud(
-            world_points_from_depth=world_points_from_depth,
+            world_points=world_points,
+            world_points_conf=processed.get("depth_conf"),
+            world_points_from_depth=world_points,
             depth_conf=processed.get("depth_conf"),
             images=processed.get("images"),
             extrinsic=processed["extrinsic"],

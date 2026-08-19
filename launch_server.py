@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # Copyright (C) 2024 Carnegie Mellon University
 """
-SwiftMap headless mapping server (no GUI).
+SwiftMap minimal headless server: starts a MappingSession and blocks.
 
-Collects frame+GPS pairs over TCP and, each time a batch of keyframes fills, runs the
-whole pipeline (reconstruction, GPS alignment, NFN, segmentation) and exports the
-results to the output directory. This is the container entrypoint that SteelEagle's
-SwiftMap cognitive engine connects to.
+Collects frame+GPS pairs over TCP and reconstructs each batch as it fills. GPS
+alignment, NFN, site growth, and segmentation are not wired up yet.
 
 Config is read from env vars (below), overridable by CLI flags:
 
@@ -14,14 +12,11 @@ Config is read from env vars (below), overridable by CLI flags:
     SWIFTMAP_PORT            TCP port                  (default 43322)
     SWIFTMAP_BACKBONE        vggt | vggt_omega         (default vggt)
     SWIFTMAP_SEGMENTER       segmentation model        (default sam3)
-    SWIFTMAP_SITE            site-tag prefix           (default site)
-    SWIFTMAP_MAX_KEYFRAMES   keyframes per batch       (default 70)
-    SWIFTMAP_CONF_THRESHOLD  confidence percentile     (default 60)
-    SWIFTMAP_MERGE_VOXEL     grow-merge voxel size (m) (default 0.1)
-    SWIFTMAP_MASK_SKY        true|false                (default true)
+    SWIFTMAP_SITE            site-tag prefix           (default map)
+    SWIFTMAP_BATCH_SIZE      keyframes per batch       (default 70)
+    SWIFTMAP_MIN_DISPARITY   keyframe-selection px     (default 40)
     SWIFTMAP_KEEP_ALL        keep every frame          (default false)
     SWIFTMAP_OUTPUT_DIR      export dir (mount this)   (default output)
-    SWIFTMAP_VIEWER_PORT     viewer web port           (default 7866)
 
 Usage:
     python launch_server.py
@@ -53,40 +48,26 @@ def _env(name: str, default):
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="SwiftMap headless auto-mapping server",
+        description="SwiftMap minimal headless server",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--host", default=_env("SWIFTMAP_HOST", "0.0.0.0"))
     p.add_argument("--port", type=int, default=int(_env("SWIFTMAP_PORT", protocol.TCP_PORT)))
-    p.add_argument("--backbone", default=_env("SWIFTMAP_BACKBONE", "vggt"))
-    p.add_argument("--segmenter", default=_env("SWIFTMAP_SEGMENTER", "sam3"),
-                   help="segmentation model used by the on-demand segment service")
-    p.add_argument("--site", default=_env("SWIFTMAP_SITE", "site"),
-                   help="site-tag prefix (drone / site name)")
-    p.add_argument("--max-keyframes", type=int,
-                   default=int(_env("SWIFTMAP_MAX_KEYFRAMES", constants.DEFAULT_MAX_KEYFRAMES)))
-    p.add_argument("--conf-threshold", type=float,
-                   default=float(_env("SWIFTMAP_CONF_THRESHOLD", constants.DEFAULT_CONF_THRESHOLD)))
-    p.add_argument("--merge-voxel", type=float,
-                   default=float(_env("SWIFTMAP_MERGE_VOXEL", 0.1)),
-                   help="voxel size (m) for merging each batch into the growing site")
-    p.add_argument("--mask-sky", type=lambda s: str(s).lower() in ("1", "true", "yes", "on"),
-                   default=_env_bool("SWIFTMAP_MASK_SKY", True))
+    p.add_argument("--backbone", default=_env("SWIFTMAP_BACKBONE", constants.DEFAULT_RECONSTRUCTOR))
+    p.add_argument("--segmenter", default=_env("SWIFTMAP_SEGMENTER", constants.DEFAULT_SEGMENTER))
+    p.add_argument("--site", default=_env("SWIFTMAP_SITE", "map"))
+    p.add_argument("--batch-size", type=int,
+                   default=int(_env("SWIFTMAP_BATCH_SIZE", constants.DEFAULT_MAX_KEYFRAMES)))
+    p.add_argument("--min-disparity", type=float,
+                   default=float(_env("SWIFTMAP_MIN_DISPARITY", constants.DEFAULT_MIN_DISPARITY)))
     p.add_argument("--keep-all", action="store_true", default=_env_bool("SWIFTMAP_KEEP_ALL", False))
     p.add_argument("--output-dir", default=_env("SWIFTMAP_OUTPUT_DIR", "output"))
-    p.add_argument("--viewer-host", default=_env("SWIFTMAP_VIEWER_HOST", "0.0.0.0"))
-    p.add_argument("--viewer-port", type=int,
-                   default=int(_env("SWIFTMAP_VIEWER_PORT", constants.GUI_PORT)))
     args = p.parse_args()
 
     cfg = ServerConfig(
         host=args.host, port=args.port,
         backbone=args.backbone, segmenter=args.segmenter, site=args.site,
-        max_keyframes=args.max_keyframes,
-        conf_threshold=args.conf_threshold,
-        merge_voxel=args.merge_voxel,
-        mask_sky=args.mask_sky, keep_all=args.keep_all,
-        output_dir=args.output_dir,
-        viewer_host=args.viewer_host, viewer_port=args.viewer_port,
+        batch_size=args.batch_size, min_disparity=args.min_disparity,
+        keep_all=args.keep_all, output_dir=args.output_dir,
     )
     AutoMappingServer(cfg).run()
     return 0
