@@ -23,7 +23,7 @@ _FRUSTUM_ALPHA = 70
 _SCENE_SCALE_PERCENTILES = (5, 95)
 
 
-def generate_3d_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
+def generate_3d_scene(map: Map, params: Dict[str, Any]):
     """Build the confidence-filtered preview scene and attach it as pt.scene."""
     try:
         print("Generating 3D content...")
@@ -50,10 +50,8 @@ def generate_3d_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
         pt.scene = scene
 
         print(f"3D scene generated: {len(xyz)} points")
-        return {"success": True}
     except Exception as e:
         print(f"Error generating 3D content: {e}")
-        return {"error": str(e)}
 
 def _camera_frustums(frames, size: float):
     """One translucent Trimesh of camera-frustum pyramids, rainbow-colored by index."""
@@ -93,7 +91,7 @@ def _align_scene(scene: trimesh.Scene, extrinsic):
     scene.apply_transform(np.linalg.inv(first) @ opengl @ align_y180)
 
 
-def generate_confidence_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any]:
+def generate_confidence_scene(map: Map, params: Dict[str, Any]):
     """Build the map-quality confidence point cloud and attach it as pt.confidence_scene."""
     try:
         print("Generating confidence mapping...")
@@ -111,10 +109,8 @@ def generate_confidence_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any
             "mean_confidence": float(np.mean(conf)) if len(conf) else 0.0,
             "confidence_std": float(np.std(conf)) if len(conf) else 0.0,
         }
-        pt.confidence_stats = stats
         if len(xyz) == 0:
             pt.confidence_scene = None
-            return {"statistics": stats}
 
         if len(xyz) > _MAX_CONFIDENCE_POINTS:
             idx = np.random.choice(len(xyz), _MAX_CONFIDENCE_POINTS, replace=False)
@@ -128,7 +124,6 @@ def generate_confidence_scene(map: Map, params: Dict[str, Any]) -> Dict[str, Any
 
         print(f"Confidence mapping generated: {stats['high_conf_points']}/{stats['total_points']} "
               f"high-confidence points")
-        return {"statistics": stats}
     except Exception as e:
         print(f"Error generating confidence mapping: {e}")
         return {"error": str(e)}
@@ -145,7 +140,7 @@ def _confidence_to_colors(confidence: np.ndarray) -> np.ndarray:
     return colors
 
 
-def generate_camera_poses(map: Map, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def generate_camera_poses(map: Map, params: Dict[str, Any]):
     """Build the camera_poses.json payload and attach it as pt.camera_poses."""
     pt = map.get_pointcloud()
     if pt is None or pt.extrinsic is None or pt.intrinsic is None:
@@ -178,10 +173,9 @@ def generate_camera_poses(map: Map, params: Dict[str, Any]) -> Optional[Dict[str
         })
 
     pt.camera_poses = poses_data
-    return poses_data
 
 
-def generate_model_input(map: Map) -> Optional[list]:
+def generate_model_input(map: Map):
     """Encode the model-resolution input frames as JPEGs and attach as pt.model_input."""
     import cv2
     pt = map.get_pointcloud()
@@ -199,7 +193,6 @@ def generate_model_input(map: Map) -> Optional[list]:
         if ok:
             encoded.append((f"frame_{i:06d}.jpg", buf.tobytes()))
     pt.model_input = encoded
-    return encoded
 
 
 def _flatten_valid(percentile: float, pts, conf):

@@ -20,28 +20,31 @@ import numpy as np
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
+from swiftmap.core import constants
 from swiftmap.core.transport import protocol
+from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.database.map import Map
 
 
 class Transporter:
     """Receives drone frames over TCP, selects keyframes, and batches them into a Map for reconstruction."""
 
-    def __init__(self, keyframe_selector, batch_size: int, db,
+    def __init__(self, batch_size: int, db,
+                 min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
                  host: str = "0.0.0.0", port: int = protocol.TCP_PORT,
                  temp_dir: Optional[str] = None):
         """
         Args:
-            keyframe_selector: decides ``is_keyframe(image)`` for each received frame.
             batch_size: keyframes per batch; a batch is queued the moment it fills.
             db: ``Database`` used to create the ``Map`` a closed batch becomes.
+            min_disparity: keyframe-selection threshold; 0 keeps every frame.
             host, port: where to listen.
             temp_dir: directory for keyframe JPEGs. If given (session-owned), it is
                       not deleted on stop. If None, the server creates and owns one.
         """
         self.host = host
         self.port = port
-        self.keyframe_selector = keyframe_selector
+        self.keyframe_selector = KeyframeSelector(min_disparity=min_disparity)
         self.batch_size = batch_size
         self.db = db
 
@@ -356,9 +359,7 @@ class Transporter:
 
 # Example usage and testing
 if __name__ == "__main__":
-    from swiftmap.core.transport.keyframe_selector import KeyframeSelector
-
-    server = Transporter(keyframe_selector=KeyframeSelector(), batch_size=5)
+    server = Transporter(batch_size=5, db=None)
 
     try:
         if server.initialize():

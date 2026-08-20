@@ -26,7 +26,6 @@ class ServerConfig:
     site: str = "map"
     batch_size: int = constants.DEFAULT_MAX_KEYFRAMES
     min_disparity: float = constants.DEFAULT_MIN_DISPARITY
-    keep_all: bool = False
     output_dir: str = "output"
 
 
@@ -49,7 +48,7 @@ class AutoMappingServer:
         """Start the session and block until interrupted."""
         print(f"[swiftmap-server] starting on {self.cfg.host}:{self.cfg.port} "
               f"(backbone={self.cfg.backbone}, batch_size={self.cfg.batch_size})")
-        if not self.session.start(port=self.cfg.port, keep_all=self.cfg.keep_all):
+        if not self.session.start(port=self.cfg.port):
             raise RuntimeError("Failed to start the TCP collection server")
 
         try:

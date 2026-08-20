@@ -53,7 +53,6 @@ class PointCloud:
 
         self.scene = None                # trimesh.Scene -- scene.glb
         self.confidence_scene = None     # trimesh.Scene -- confidence_map.glb
-        self.confidence_stats = None     # dict -- point counts/coverage from the above
         self.camera_poses = None         # dict -- camera_poses.json payload
         self.model_input = None          # [(filename, jpeg bytes)] -- model_input/
 

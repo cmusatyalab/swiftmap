@@ -24,19 +24,16 @@ class KeyframeSelector:
     """Optical-flow keyframe selector: a pure decision over a single frame."""
 
     def __init__(self, min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
-                 visualize_flow: bool = False, keep_all: bool = False):
+                 visualize_flow: bool = False):
         """
         Args:
             min_disparity: minimum mean optical-flow disparity (pixels) for a frame
-                           to be selected as a keyframe.
+                           to be selected as a keyframe. 0 (or less) skips selection
+                           entirely -- every frame is kept.
             visualize_flow: draw optical-flow vectors (debugging) in compute_disparity.
-            keep_all: if True, skip optical-flow selection -- every frame is a
-                      candidate keyframe (the session's cap then bounds them as a FIFO
-                      window). Useful for a denser, unfiltered trajectory.
         """
         self.min_disparity = min_disparity
         self.visualize_flow = visualize_flow
-        self.keep_all = keep_all
 
         # Stateful optical-flow tracker (tracks features vs. the last keyframe).
         self.frame_tracker = FrameTracker()
@@ -61,7 +58,7 @@ class KeyframeSelector:
             True if the frame's motion vs. the last keyframe exceeds min_disparity.
         """
         start = time.time()
-        if self.keep_all:
+        if self.min_disparity <= 0:
             # No selection: keep every frame.
             if self.visualize_flow:
                 self._keyframe_vis = image

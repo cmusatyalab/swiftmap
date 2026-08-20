@@ -15,7 +15,6 @@ Config is read from env vars (below), overridable by CLI flags:
     SWIFTMAP_SITE            site-tag prefix           (default map)
     SWIFTMAP_BATCH_SIZE      keyframes per batch       (default 70)
     SWIFTMAP_MIN_DISPARITY   keyframe-selection px     (default 40)
-    SWIFTMAP_KEEP_ALL        keep every frame          (default false)
     SWIFTMAP_OUTPUT_DIR      export dir (mount this)   (default output)
 
 Usage:
@@ -36,11 +35,6 @@ from swiftmap.core.transport import protocol
 from swiftmap.server import AutoMappingServer, ServerConfig
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.environ.get(name)
-    return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
-
-
 def _env(name: str, default):
     v = os.environ.get(name)
     return default if v is None or v == "" else v
@@ -59,7 +53,6 @@ def main() -> int:
                    default=int(_env("SWIFTMAP_BATCH_SIZE", constants.DEFAULT_MAX_KEYFRAMES)))
     p.add_argument("--min-disparity", type=float,
                    default=float(_env("SWIFTMAP_MIN_DISPARITY", constants.DEFAULT_MIN_DISPARITY)))
-    p.add_argument("--keep-all", action="store_true", default=_env_bool("SWIFTMAP_KEEP_ALL", False))
     p.add_argument("--output-dir", default=_env("SWIFTMAP_OUTPUT_DIR", "output"))
     args = p.parse_args()
 
@@ -67,7 +60,7 @@ def main() -> int:
         host=args.host, port=args.port,
         backbone=args.backbone, segmenter=args.segmenter, site=args.site,
         batch_size=args.batch_size, min_disparity=args.min_disparity,
-        keep_all=args.keep_all, output_dir=args.output_dir,
+        output_dir=args.output_dir,
     )
     AutoMappingServer(cfg).run()
     return 0

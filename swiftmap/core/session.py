@@ -21,15 +21,13 @@ import tempfile
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-import numpy as np
 
 from swiftmap.core import constants
 from swiftmap.database import Database
 from swiftmap.database.map import Map
 from swiftmap.core.transport import protocol
-from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.transport.transporter import Transporter
-from swiftmap.core.pipeline.reconstructor import get_reconstructor
+from swiftmap.core.pipeline.reconstructor import get_reconstructor, BaseReconstructor
 # from swiftmap.core.pipeline.segmentor import get_segmenter, lift  # broken, not needed to start the session
 # from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner  # broken, not needed to start the session
 # from swiftmap.core.pipeline.gps_transformer import GpsTransformer  # not needed to start the session
@@ -43,7 +41,7 @@ class MappingSession:
                  min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
                  root: str = None,
                  site: str = "map",
-                 backbone: [str] = [constants.DEFAULT_RECONSTRUCTOR, constants.DEFAULT_SEGMENTER]):
+                 backbone: List[str] = [constants.DEFAULT_RECONSTRUCTOR, constants.DEFAULT_SEGMENTER]):
         self.host = host
 
         # db
@@ -51,14 +49,14 @@ class MappingSession:
 
         # pipeline stages
         self.backbone: Optional[str] = None
-        self.reconstructor = get_reconstructor(backbone[0])
+        self.reconstructor: BaseReconstructor = get_reconstructor(backbone[0])
         self.segmenter = None  # get_segmenter(backbone[1])  # broken, not needed to start the session
         self.planner = None  # NextFlightPlanner()  # broken, not needed to start the session
         self.aligner = None  # GpsTransformer()  # not needed to start the session
 
         # transport
         self.batch_size = constants.DEFAULT_MAX_KEYFRAMES  # a batch closes at this size
-        self.selector = KeyframeSelector(min_disparity=min_disparity)
+        self.min_disparity = min_disparity
         self.transporter: Optional[Transporter] = None
         self.port: Optional[int] = None
         self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_session_")  # scratch dir for keyframe JPEGs
@@ -72,25 +70,23 @@ class MappingSession:
     # =============================================================== lifecycle
     def start(self,
               port: int = protocol.TCP_PORT,
-              min_disparity: Optional[float] = None,
-              keep_all: Optional[bool] = None) -> bool:
+              min_disparity: Optional[float] = None) -> bool:
         """Start the TCP transport and begin collecting keyframes."""
         if self.is_running:
             print("Mapping session already running")
             return True
 
         if min_disparity is not None:
-            self.selector.configure_disparity_threshold(min_disparity)
-        if keep_all is not None:
-            self.selector.keep_all = keep_all
+            self.min_disparity = min_disparity
 
         self.port = port
-        self.transporter = Transporter(self.selector, self.batch_size, self.db,
+        self.transporter = Transporter(self.batch_size, self.db,
+                                       min_disparity=self.min_disparity,
                                        host=self.host, port=port,
                                        temp_dir=self.temp_dir)
 
         print("Starting SwiftMap Mapping Session...")
-        print(f"Server: {self.host}:{port} | min disparity: {self.selector.min_disparity} px, batch size: {self.batch_size}, keep_all: {self.selector.keep_all}")
+        print(f"Server: {self.host}:{port} | min disparity: {self.min_disparity} px, batch size: {self.batch_size}")
 
         self.start_time = datetime.now()
         self.transport_thread = threading.Thread(target=self.transporter.start_server, daemon=True)
@@ -151,8 +147,9 @@ class MappingSession:
     # ======================================================================= stats
     def get_stats(self) -> Dict[str, Any]:
         """Combined session statistics (selection + transport)."""
-        stats = self.selector.get_stats()
+        stats = {}
         if self.transporter:
+            stats = self.transporter.keyframe_selector.get_stats()
             stats["transporter_stats"] = self.transporter.get_stats()
             stats["keyframes_selected"] = self.transporter.total_keyframes_selected
         if self.start_time:
