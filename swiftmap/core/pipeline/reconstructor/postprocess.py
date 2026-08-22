@@ -5,19 +5,17 @@
 import copy
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 import trimesh
 
-from swiftmap.core import constants
+from swiftmap import constants
 from swiftmap.database.map import Map
-from swiftmap.database.types import PointCloud
-from swiftmap.core.pipeline.reconstructor.pose import camera_poses_from_extrinsics
+from swiftmap.database.types import CameraPose
 
 _SKY_MASK_THRESHOLD = 0.1
 _MAX_CONFIDENCE_POINTS = 50000
-_CONF_EPSILON = 1e-6
 _FRUSTUM_SCALE = 0.1
 _FRUSTUM_ALPHA = 70
 _SCENE_SCALE_PERCENTILES = (5, 95)
@@ -28,24 +26,19 @@ def generate_3d_scene(map: Map, params: Dict[str, Any]):
     try:
         print("Generating 3D content...")
         pt = map.get_pointcloud()
-        pts, conf = pt.world_points, pt.world_points_conf
+        sky_conf = _apply_sky_mask(map) if params.get("mask_sky") else None
 
-        if params.get("mask_sky"):
-            conf = _apply_sky_mask(map)
-        xyz, conf, keep = _flatten_valid(params["conf_threshold"], pts, conf)
-        xyz, conf = xyz[keep], conf[keep]
+        keep = pt.confidence_mask(params["conf_threshold"], sky_conf)
+        xyz = pt.flatten_points()[keep]
         cols = pt.flatten_colors()[keep]
 
         scene = trimesh.Scene()
         geometry = trimesh.PointCloud(vertices=xyz, colors=cols)
         scene.add_geometry(geometry, geom_name="points")
-        if params.get("show_cam") and pt.extrinsic is not None and len(xyz):
-            positions, rotations = camera_poses_from_extrinsics(pt.extrinsic)
-            frames = [{"camera_position_world": p.tolist(), "rotation_matrix": R.tolist()}
-                      for p, R in zip(positions, rotations)]
+        if params.get("show_cam") and pt.cameras and len(xyz):
             lo, hi = np.percentile(xyz, _SCENE_SCALE_PERCENTILES, axis=0)
             size = float(np.linalg.norm(hi - lo) * _FRUSTUM_SCALE)
-            scene.add_geometry(_camera_frustums(frames, size), geom_name="cameras")
+            scene.add_geometry(_camera_frustums(pt.cameras, size), geom_name="cameras")
         _align_scene(scene, pt.extrinsic)
         pt.scene = scene
 
@@ -53,25 +46,24 @@ def generate_3d_scene(map: Map, params: Dict[str, Any]):
     except Exception as e:
         print(f"Error generating 3D content: {e}")
 
-def _camera_frustums(frames, size: float):
+def _camera_frustums(cameras: List[CameraPose], size: float):
     """One translucent Trimesh of camera-frustum pyramids, rainbow-colored by index."""
     import colorsys
     from trimesh.visual.material import PBRMaterial
     corners = np.array([[-0.5, -0.375, 1.0], [0.5, -0.375, 1.0],
                         [0.5, 0.375, 1.0], [-0.5, 0.375, 1.0]])
-    verts = np.zeros((len(frames) * 5, 3))
-    faces = np.zeros((len(frames) * 4, 3), dtype=np.int64)
-    colors = np.zeros((len(frames) * 4, 4), dtype=np.uint8)
-    for k, fr in enumerate(frames):
-        r = np.asarray(fr["rotation_matrix"], float)
-        c = np.asarray(fr["camera_position_world"], float)
-        base = (r.T @ (size * corners).T).T + c
+    verts = np.zeros((len(cameras) * 5, 3))
+    faces = np.zeros((len(cameras) * 4, 3), dtype=np.int64)
+    colors = np.zeros((len(cameras) * 4, 4), dtype=np.uint8)
+    for k, cam in enumerate(cameras):
+        c = cam.position
+        base = (cam.rotation.T @ (size * corners).T).T + c
         vb = 5 * k
         verts[vb] = c
         verts[vb + 1:vb + 5] = base
         for i in range(4):
             faces[4 * k + i] = [vb, vb + 1 + i, vb + 1 + (i + 1) % 4]
-        rgb = colorsys.hsv_to_rgb(k / max(len(frames), 1), 1.0, 1.0)
+        rgb = colorsys.hsv_to_rgb(k / max(len(cameras), 1), 1.0, 1.0)
         colors[4 * k:4 * k + 4] = [int(255 * v) for v in rgb] + [255]
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
     mesh.visual = trimesh.visual.ColorVisuals(mesh=mesh, face_colors=colors)
@@ -96,12 +88,11 @@ def generate_confidence_scene(map: Map, params: Dict[str, Any]):
     try:
         print("Generating confidence mapping...")
         pt = map.get_pointcloud()
-        pts, conf = pt.world_points, pt.world_points_conf
-        if pts is None:
+        if pt.world_points is None:
             return {"error": "No world points or depth available in predictions"}
 
-        xyz, conf, keep = _flatten_valid(params["conf_threshold"], pts, conf)
-        xyz, conf = xyz[keep], conf[keep]
+        keep = pt.confidence_mask(params["conf_threshold"])
+        xyz, conf = pt.flatten_points()[keep], pt.flatten_conf()[keep]
         stats = {
             "total_points": int(keep.size),
             "high_conf_points": len(xyz),
@@ -146,27 +137,23 @@ def generate_camera_poses(map: Map, params: Dict[str, Any]):
     if pt is None or pt.extrinsic is None or pt.intrinsic is None:
         return None
 
-    extrinsic = np.asarray(pt.extrinsic)
-    intrinsic = np.asarray(pt.intrinsic)
     keyframe_paths = map.get_keyframe_paths()
-    positions, rotations = camera_poses_from_extrinsics(extrinsic)
-
     poses_data = {
         "metadata": {
             "description": "Camera poses from SwiftMap Mapping",
             "backbone": params.get("backbone"),
             "timestamp": datetime.now().isoformat(),
-            "num_keyframes": len(extrinsic),
+            "num_keyframes": len(pt.extrinsic),
         },
         "frames": [],
     }
-    for i, (ext, intr, pos, rot) in enumerate(zip(extrinsic, intrinsic, positions, rotations)):
+    for i, (ext, intr, cam) in enumerate(zip(pt.extrinsic, pt.intrinsic, pt.cameras)):
         image_name = (os.path.basename(keyframe_paths[i])
                       if i < len(keyframe_paths) else f"keyframe_{i}")
         poses_data["frames"].append({
             "image_name": image_name,
-            "camera_position_world": pos.tolist(),
-            "rotation_matrix": rot.tolist(),
+            "camera_position_world": cam.position.tolist(),
+            "rotation_matrix": cam.rotation.tolist(),
             "translation_vector": ext[:3, 3].tolist(),
             "intrinsic_matrix": intr.tolist(),
             "extrinsic_matrix": ext.tolist(),
@@ -193,18 +180,6 @@ def generate_model_input(map: Map):
         if ok:
             encoded.append((f"frame_{i:06d}.jpg", buf.tobytes()))
     pt.model_input = encoded
-
-
-def _flatten_valid(percentile: float, pts, conf):
-    """Flatten points/conf and mask to finite points at/above the confidence percentile."""
-    xyz = np.asarray(pts).reshape(-1, 3)
-    conf = np.asarray(conf, dtype=float).reshape(-1)
-
-    keep = np.isfinite(xyz).all(1) & (conf > _CONF_EPSILON)
-    if percentile:
-        thr = np.percentile(conf, float(percentile))
-        keep &= conf >= thr
-    return xyz, conf, keep
 
 
 def _apply_sky_mask(map: Map) -> np.ndarray:

@@ -20,7 +20,7 @@ import torch
 from swiftmap.database.map import Map
 from swiftmap.database.types import PointCloud
 from swiftmap.core.pipeline.reconstructor import postprocess
-from swiftmap.core import constants
+from swiftmap import constants
 
 
 class BaseReconstructor(ABC):

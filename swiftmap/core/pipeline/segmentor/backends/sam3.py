@@ -19,7 +19,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from swiftmap.core import constants
+from swiftmap import constants
 from swiftmap.core.pipeline.segmentor.base import BaseSegmenter
 from swiftmap.core.pipeline.segmentor.registry import register_segmenter
 

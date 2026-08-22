@@ -1,6 +1,6 @@
 # Copyright (C) 2024 Carnegie Mellon University
 """Keyframe selection: optical-flow frame tracking + the keyframe-decision engine."""
-from swiftmap.core.transport.keyframe_selector.keyframe_selector import KeyframeSelector
-from swiftmap.core.transport.keyframe_selector.frame_tracker import FrameTracker
+from swiftmap.server.transport.keyframe_selector.keyframe_selector import KeyframeSelector
+from swiftmap.server.transport.keyframe_selector.frame_tracker import FrameTracker
 
 __all__ = ["KeyframeSelector", "FrameTracker"]

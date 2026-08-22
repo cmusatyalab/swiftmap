@@ -30,9 +30,9 @@ from typing import Optional, Tuple
 import cv2
 
 # Make the swiftmap package importable when run as a standalone script, so the
-# wire protocol has a single source of truth (swiftmap.core.transport.protocol).
+# wire protocol has a single source of truth (swiftmap.server.transport.protocol).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from swiftmap.core.transport import protocol
+from swiftmap.server.transport import protocol
 
 
 class MappingTestClient:

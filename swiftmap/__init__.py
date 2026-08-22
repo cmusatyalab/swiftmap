@@ -24,13 +24,12 @@ except PackageNotFoundError:      # running from source, not pip-installed
 
 # Main system components
 from swiftmap.core.session import MappingSession
-from swiftmap.core.transport.transporter import Transporter
-from swiftmap.core.transport.keyframe_selector import KeyframeSelector
 from swiftmap.core.pipeline.reconstructor import (
     BaseReconstructor, VGGTReconstructor, VGGTOmegaReconstructor, get_reconstructor, available_reconstructors)
 
-# Keyframe selection helper
-from swiftmap.core.transport.keyframe_selector import FrameTracker
+# Transport (collection + keyframe selection)
+from swiftmap.server.transport.transporter import Transporter
+from swiftmap.server.transport.keyframe_selector import KeyframeSelector, FrameTracker
 
 __all__ = [
     "MappingSession",

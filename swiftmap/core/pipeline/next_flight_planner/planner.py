@@ -8,109 +8,105 @@ Idea: a VGGT reconstruction comes with a per-point confidence. Points that pass 
 yet reliable. Those are exactly the places worth re-flying.
 
 Pipeline:
+  0. Push the reconstruction through the Map's Georeference into ENU metres.
   1. Keep the points whose confidence falls in the [P_low, P_high) band.
-  2. Estimate the ground plane (PCA) and tile the band points into fixed-footprint cells
-     on that plane. Each well-populated cell is one local cluster -- so a large weak area
-     becomes several actionable viewpoints instead of one giant blob.
-  3. Fit a surface normal per cluster (PCA), oriented toward the observed side.
-  4. Place a suggested viewpoint at a fixed stand-off along the normal, looking back at
-     the cluster center.
+  2. Tile the band points into fixed-footprint cells on the East/North ground plane. Each
+     well-populated cell is one local cluster -- so a large weak area becomes several
+     actionable viewpoints instead of one giant blob.
+  3. Fit a surface normal per cluster (PCA), oriented upward.
+  4. Place a suggested viewpoint at a fixed stand-off along a tilted view direction,
+     looking back at the cluster center.
 
-All distances are scale-relative (VGGT world coordinates are unitless), derived from the
-scene's bounding-box diagonal, so the planner works regardless of the scene's scale.
+The planner works in ENU metres throughout, so every distance is a real metre and the
+per-cluster golden-angle heading is a true compass azimuth. It requires a GPS-aligned Map.
 """
-
-import json
-import math
-import os
 
 import numpy as np
 
-from swiftmap.core.pipeline import utils as pipeline_utils
 from typing import Any, Dict, List, Optional
+from swiftmap.core.pipeline.next_flight_planner import postprocess
+from swiftmap.database.map import Map
+from swiftmap.database.types import CameraPose, Cluster, Viewpoint
 
 
 class NextFlightPlanner:
-    def __init__(self,
-                 low_percentile: float = 60.0,
-                 high_percentile: float = 80.0,
-                 cell_fraction: float = 0.1,
-                 standoff_fraction: float = 0.12,
-                 tilt_deg: float = 35.0,
-                 min_cluster_points: int = 30,
-                 max_viewpoints: int = 20):
+    def __init__(self):
         """
-        Args:
+        params:
             low_percentile:  loose confidence cut (the "60%" map).
             high_percentile: strict confidence cut (the "80" map).
-            cell_fraction:   side length of each planning cell, as a fraction of the scene
-                             diagonal (the footprint a single suggested viewpoint covers).
-            standoff_fraction: how far from the surface to place a viewpoint, as a
-                             fraction of the scene diagonal.
-            tilt_deg:        oblique angle of suggested viewpoints away from the surface
-                             normal (0 = straight-down nadir). Each cluster gets a
-                             different azimuth so the plan covers varied viewing angles.
+            cell_size_m:     side length of each planning cell in metres (the ground
+                             footprint a single suggested viewpoint covers).
+            standoff_m:      how far above the surface to place a viewpoint, in metres.
+            tilt_deg:        oblique angle of suggested viewpoints away from vertical
+                             (0 = straight-down nadir). Each cluster gets a different
+                             azimuth so the plan covers varied viewing angles.
             min_cluster_points: discard cells with fewer band points than this.
             max_viewpoints:  cap on the number of suggested viewpoints (weakest cells first).
         """
-        self.low_percentile = low_percentile
-        self.high_percentile = high_percentile
-        self.cell_fraction = cell_fraction
-        self.standoff_fraction = standoff_fraction
-        self.tilt_deg = tilt_deg
-        self.min_cluster_points = min_cluster_points
-        self.max_viewpoints = max_viewpoints
 
-    def plan(self, predictions: Dict) -> Dict:
-        wp = np.asarray(predictions["world_points"]).reshape(-1, 3)
-        conf = np.asarray(predictions["world_points_conf"]).reshape(-1)
+        self.default_params = {
+            "low_percentile": 60.0,
+            "high_percentile": 80.0,
+            "cell_size_m": 5.0,
+            "standoff_m": 15.0,
+            "tilt_deg": 35.0,
+            "min_cluster_points": 30,
+            "max_viewpoints": 20,
+        }
+
+    def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict:
+        # process params
+        params = self.default_params.copy()
+        if processing_params:
+            params.update(processing_params)
+
+        # get the world points
+        pt = map.get_pointcloud()
+        if pt is None or pt.world_points is None:
+            return self._empty("No reconstruction to plan from", params)
+        georef = map.get_georeference()
+        if georef is None:
+            return self._empty("Map is not GPS-aligned; run align_gps() first", params)
+
+        wp, conf = pt.flatten_points(), pt.flatten_conf()
         valid = np.isfinite(wp).all(1) & np.isfinite(conf)
         wp, conf = wp[valid], conf[valid]
         if len(wp) == 0:
-            return self._empty("No valid points")
+            return self._empty("No valid points", params)
 
-        # Scene scale (VGGT world coords are unitless -> everything is scale-relative)
-        diag = float(np.linalg.norm(wp.max(0) - wp.min(0))) + 1e-9
+        # Everything below is ENU metres about the georeference origin.
+        wp = georef.to_enu(wp)
+        extent = float(np.linalg.norm(wp.max(0) - wp.min(0)))
 
-        # Confidence band between the loose and strict thresholds = "to-improve" points
-        p_low = float(np.percentile(conf, self.low_percentile))
-        p_high = float(np.percentile(conf, self.high_percentile))
+        # Confidence band between the loose and strict thresholds
+        p_low = float(np.percentile(conf, params["low_percentile"]))
+        p_high = float(np.percentile(conf, params["high_percentile"]))
         if p_low >= p_high:
             # Confidence is near-uniform, so there is no weak band to target.
             return self._empty(
                 "VGGT confidence is saturated (near-uniform across all points), so there "
                 "are no low-confidence regions to target. The reconstruction is weakly "
                 "constrained — capture more overlapping views and try again.",
-                np.empty((0, 3)), p_low, p_high, diag)
+                params, np.empty((0, 3)), p_low, p_high, extent)
         band = (conf >= p_low) & (conf < p_high)
         enhance_pts = wp[band]
-        if len(enhance_pts) < self.min_cluster_points:
-            return self._empty("Not enough band points to plan", enhance_pts, p_low, p_high, diag)
+        if len(enhance_pts) < params["min_cluster_points"]:
+            return self._empty("Not enough band points to plan", params,
+                               enhance_pts, p_low, p_high, extent)
 
-        # Ground plane (PCA): up = least-variance axis; (basis_u, basis_v) span the plane
         scene_centroid = wp.mean(0)
-        _, eigvecs = np.linalg.eigh(np.cov((wp - scene_centroid).T))
-        up = eigvecs[:, 0]
-        basis_v, basis_u = eigvecs[:, 1], eigvecs[:, 2]
-        cams = self._camera_positions(predictions)
-        if cams is not None and len(cams) and np.dot(up, cams.mean(0) - scene_centroid) < 0:
-            up = -up
+        east, north, up = np.eye(3)
+        cell = max(float(params["cell_size_m"]), 1e-9)
+        inverse = self._tile_cells(enhance_pts, scene_centroid, east, north, cell)
 
-        # Tile the band points into fixed-footprint cells on the ground plane
-        rel = enhance_pts - scene_centroid
-        u = rel @ basis_u
-        v = rel @ basis_v
-        cell = max(diag * self.cell_fraction, 1e-9)
-        cells = np.stack([np.floor(u / cell), np.floor(v / cell)], axis=1).astype(int)
-        _, inverse = np.unique(cells, axis=0, return_inverse=True)
-
-        standoff = diag * self.standoff_fraction
-        tilt = np.deg2rad(self.tilt_deg)
-        golden = np.pi * (3.0 - np.sqrt(5.0))  # spreads azimuths evenly across clusters
+        standoff = float(params["standoff_m"])
+        tilt = np.deg2rad(params["tilt_deg"])
+        golden = np.pi * (3.0 - np.sqrt(5.0))
         clusters, viewpoints = [], []
         for gi in range(inverse.max() + 1):
             cpts = enhance_pts[inverse == gi]
-            if len(cpts) < self.min_cluster_points:
+            if len(cpts) < params["min_cluster_points"]:
                 continue
 
             centroid = cpts.mean(0)
@@ -119,48 +115,50 @@ class NextFlightPlanner:
                 normal = -normal
             radius = float(np.linalg.norm(cpts - centroid, axis=1).max())
 
-            # Tilt off the normal per cluster so the views vary instead of all being nadir.
+            # Tilt off vertical per cluster so the views vary instead of all being nadir.
             k = len(clusters)
-            phi = k * golden
-            horiz = np.cos(phi) * basis_u + np.sin(phi) * basis_v
+            azimuth = (k * golden) % (2.0 * np.pi)
+            horiz = np.sin(azimuth) * east + np.cos(azimuth) * north
             view_dir = np.cos(tilt) * up + np.sin(tilt) * horiz
             view_dir /= (np.linalg.norm(view_dir) + 1e-9)
             position = centroid + view_dir * standoff
             rotation = self._look_at(position, centroid, up)
 
-            clusters.append({
-                "id": k, "centroid": centroid, "normal": normal,
-                "num_points": int(len(cpts)), "radius": radius,
-            })
-            viewpoints.append({
-                "cluster_id": k,
-                "camera_position": position,
-                "camera_rotation": rotation,
-                "target": centroid,
-                "score": float(len(cpts)),
-            })
+            clusters.append(Cluster(k, centroid, normal, int(len(cpts)), radius))
+            viewpoints.append(Viewpoint(k, CameraPose(position, rotation), centroid,
+                                        float(np.rad2deg(azimuth)), float(len(cpts))))
 
-        # Prioritize the cells with the most points to improve
-        order = np.argsort([-v["score"] for v in viewpoints])[:self.max_viewpoints]
+        order = np.argsort([-v.score for v in viewpoints])[:params["max_viewpoints"]]
         viewpoints = [viewpoints[i] for i in order]
 
-        return {
-            "enhance_points": enhance_pts,
-            "clusters": clusters,
+        plan = {
             "viewpoints": viewpoints,
-            "num_viewpoints": len(viewpoints),
+            "clusters": clusters,
             "thresholds": {
-                "low_percentile": self.low_percentile, "high_percentile": self.high_percentile,
+                "low_percentile": params["low_percentile"],
+                "high_percentile": params["high_percentile"],
                 "p_low": p_low, "p_high": p_high,
             },
             "statistics": {
                 "num_enhance_points": int(len(enhance_pts)),
                 "num_clusters": len(clusters),
-                "scene_diagonal": diag, "cell_size": cell, "standoff": standoff,
+                "scene_extent_m": extent, "cell_size_m": cell, "standoff_m": standoff,
             },
         }
+        postprocess.generate_flight_plan(map, plan)
+        map.write2disk()
+        return plan
 
     # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def _tile_cells(pts: np.ndarray, origin: np.ndarray, east, north, cell: float):
+        """Per-point labels from a fixed-metre grid on the East/North ground plane."""
+        rel = pts - origin
+        grid = np.stack([np.floor((rel @ east) / cell),
+                         np.floor((rel @ north) / cell)], axis=1).astype(int)
+        _, labels = np.unique(grid, axis=0, return_inverse=True)
+        return labels
+
     @staticmethod
     def _principal_normal(centered: np.ndarray) -> np.ndarray:
         """Surface normal = direction of least variance (smallest PCA eigenvector)."""
@@ -168,14 +166,6 @@ class NextFlightPlanner:
             return np.array([0.0, 0.0, 1.0])
         _, eigvecs = np.linalg.eigh(np.cov(centered.T))
         return eigvecs[:, 0]
-
-    @staticmethod
-    def _camera_positions(predictions: Dict) -> Optional[np.ndarray]:
-        ext = predictions.get("extrinsic")
-        if ext is None:
-            return None
-        ext = np.asarray(ext)
-        return np.array([(-e[:3, :3].T @ e[:3, 3]) for e in ext])
 
     @staticmethod
     def _look_at(position: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
@@ -188,164 +178,18 @@ class NextFlightPlanner:
         y = np.cross(z, x)
         return np.column_stack([x, y, z]).astype(np.float32)
 
-    def _empty(self, msg, enhance_pts=None, p_low=0.0, p_high=0.0, diag=0.0) -> Dict:
+    def _empty(self, msg, params=None, enhance_pts=None, p_low=0.0, p_high=0.0, extent=0.0) -> Dict:
+        """Empty plan carrying the reason it could not be built."""
         print(f"[NFN] {msg}")
+        params = params or self.default_params
         return {
+            "error": msg,
             "enhance_points": enhance_pts if enhance_pts is not None else np.empty((0, 3)),
             "clusters": [], "viewpoints": [], "num_viewpoints": 0,
             "thresholds": {
-                "low_percentile": self.low_percentile, "high_percentile": self.high_percentile,
+                "low_percentile": params["low_percentile"],
+                "high_percentile": params["high_percentile"],
                 "p_low": p_low, "p_high": p_high,
             },
-            "statistics": {"message": msg, "scene_diagonal": diag},
+            "statistics": {"message": msg, "scene_extent_m": extent},
         }
-
-
-def write_plan(plan, gps_transform, target_dir, segmented=None, seg_query=None) -> str:
-    """Write next_flight_viewpoints.json (+ transform.json + KML when GPS-aligned)."""
-    viewpoints = _viewpoints_payload(plan)
-    out = {"num_viewpoints": len(viewpoints), "thresholds": plan.get("thresholds", {}),
-           "gps_aligned": gps_transform is not None, "viewpoints": viewpoints}
-    if segmented:
-        out["segmented_objects"] = {"query": seg_query, "num_objects": len(segmented),
-                                    "objects": segmented}
-    path = os.path.join(target_dir, "next_flight_viewpoints.json")
-    with open(path, "w") as f:
-        json.dump(out, f, indent=2)
-    if gps_transform is not None:
-        with open(os.path.join(target_dir, "transform.json"), "w") as f:
-            json.dump(gps_transform.cfg, f, indent=2)
-        pipeline_utils.write_kml(viewpoints, os.path.join(target_dir, "next_flight_viewpoints.kml"),
-                                 gps_key="target_gps", doc_name="nfn_pts")
-        _write_polygon_kml(viewpoints, os.path.join(target_dir, "next_flight_area.kml"),
-                           gps_key="target_gps", doc_name="nfn_area")
-    return path
-
-
-def _viewpoints_payload(plan) -> list:
-    """Per-viewpoint records from an NFN plan (GPS keys copied when tagged)."""
-    out = []
-    for i, vp in enumerate(plan.get("viewpoints", [])):
-        item = {"id": i, "cluster_id": int(vp.get("cluster_id", -1)),
-                "position": np.asarray(vp["camera_position"], float).tolist(),
-                "look_dir": np.asarray(vp["camera_rotation"], float)[:, 2].tolist(),
-                "target": np.asarray(vp["target"], float).tolist(),
-                "score": float(vp.get("score", 0.0))}
-        for k in ("camera_position_gps", "target_gps"):
-            if k in vp:
-                item["position_gps" if k == "camera_position_gps" else k] = vp[k]
-        out.append(item)
-    return out
-
-
-# ------------------------------------------------------------------ polygon (area) KML
-# Ring vertices are the NFN targets, so the plan reads as an area, not pins.
-_POLY_STYLE = """    <Style id="poly-000000-1200-77-nodesc-normal">
-      <LineStyle>
-        <color>ff000000</color>
-        <width>1.2</width>
-      </LineStyle>
-      <PolyStyle>
-        <color>4d000000</color>
-        <fill>1</fill>
-        <outline>1</outline>
-      </PolyStyle>
-      <BalloonStyle>
-        <text><![CDATA[<h3>$[name]</h3>]]></text>
-      </BalloonStyle>
-    </Style>
-    <Style id="poly-000000-1200-77-nodesc-highlight">
-      <LineStyle>
-        <color>ff000000</color>
-        <width>1.8</width>
-      </LineStyle>
-      <PolyStyle>
-        <color>4d000000</color>
-        <fill>1</fill>
-        <outline>1</outline>
-      </PolyStyle>
-      <BalloonStyle>
-        <text><![CDATA[<h3>$[name]</h3>]]></text>
-      </BalloonStyle>
-    </Style>
-    <StyleMap id="poly-000000-1200-77-nodesc">
-      <Pair>
-        <key>normal</key>
-        <styleUrl>#poly-000000-1200-77-nodesc-normal</styleUrl>
-      </Pair>
-      <Pair>
-        <key>highlight</key>
-        <styleUrl>#poly-000000-1200-77-nodesc-highlight</styleUrl>
-      </Pair>
-    </StyleMap>"""
-
-
-def _order_ring(latlons: List[tuple]) -> List[tuple]:
-    """Order (lat, lon) points into a simple (non-self-intersecting) ring.
-
-    Sort by polar angle around the centroid: sorting around an interior point
-    always yields a star-shaped, non-self-intersecting polygon.
-    """
-    clat = sum(p[0] for p in latlons) / len(latlons)
-    clon = sum(p[1] for p in latlons) / len(latlons)
-    return sorted(latlons, key=lambda p: math.atan2(p[0] - clat, p[1] - clon))
-
-
-def _polygon_to_kml(viewpoints: List[Dict[str, Any]],
-                    gps_key: str, doc_name: str,
-                    layer_name: str = "Untitled layer",
-                    placemark_name: str = "nfn_target_area") -> Optional[str]:
-    """Build a polygon KML whose ring vertices are the viewpoints' target GPS.
-
-    Needs at least 3 GPS-tagged targets to form a polygon; returns None otherwise.
-    Vertices are ordered around their centroid and the ring is closed (first point
-    repeated at the end). Coordinates are KML order (lon, lat, alt) with alt zeroed.
-    """
-    latlons = [(float(vp[gps_key][0]), float(vp[gps_key][1]))
-               for vp in viewpoints if vp.get(gps_key)]
-    if len(latlons) < 3:
-        return None
-
-    ring = _order_ring(latlons)
-    ring.append(ring[0])  # close the ring
-    coords = "\n".join(f"                {lon:.7f},{lat:.7f},0" for lat, lon in ring)
-
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
-        '  <Document>\n'
-        f'    <name>{doc_name}</name>\n'
-        '    <description/>\n'
-        f'{_POLY_STYLE}\n'
-        '    <Folder>\n'
-        f'      <name>{layer_name}</name>\n'
-        '      <Placemark>\n'
-        f'        <name>{placemark_name}</name>\n'
-        '        <styleUrl>#poly-000000-1200-77-nodesc</styleUrl>\n'
-        '        <Polygon>\n'
-        '          <outerBoundaryIs>\n'
-        '            <LinearRing>\n'
-        '              <tessellate>1</tessellate>\n'
-        '              <coordinates>\n'
-        f'{coords}\n'
-        '              </coordinates>\n'
-        '            </LinearRing>\n'
-        '          </outerBoundaryIs>\n'
-        '        </Polygon>\n'
-        '      </Placemark>\n'
-        '    </Folder>\n'
-        '  </Document>\n'
-        '</kml>\n'
-    )
-
-
-def _write_polygon_kml(viewpoints: List[Dict[str, Any]], path: str,
-                       gps_key: str = "target_gps",
-                       doc_name: str = "nfn_area") -> Optional[str]:
-    """Write a polygon (area) KML from viewpoints' target GPS. Returns path or None."""
-    kml = _polygon_to_kml(viewpoints, gps_key=gps_key, doc_name=doc_name)
-    if kml is None:
-        return None
-    with open(path, "w") as f:
-        f.write(kml)
-    return path

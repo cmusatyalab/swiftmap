@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (C) 2024 Carnegie Mellon University
 """
-SwiftMap minimal headless server: starts a MappingSession and blocks.
+SwiftMap minimal headless server: starts the TCP transport and blocks.
 
-Collects frame+GPS pairs over TCP and reconstructs each batch as it fills. GPS
-alignment, NFN, site growth, and segmentation are not wired up yet.
+Collects frame+GPS pairs over TCP and, as each batch fills, runs it through the
+pipeline: reconstruction -> GPS alignment -> next-flight planning. Site growth and
+segmentation are not wired up yet.
 
 Config is read from env vars (below), overridable by CLI flags:
 
@@ -30,8 +31,8 @@ repo_root = os.path.dirname(os.path.abspath(__file__))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from swiftmap.core import constants
-from swiftmap.core.transport import protocol
+from swiftmap import constants
+from swiftmap.server.transport import protocol
 from swiftmap.server import AutoMappingServer, ServerConfig
 
 

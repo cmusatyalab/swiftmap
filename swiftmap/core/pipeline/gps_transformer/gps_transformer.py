@@ -6,7 +6,10 @@ trajectory to a GPS trace and builds the ``Georeference`` (in
 ``swiftmap.core.database``) that applies it."""
 
 import numpy as np
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional
+
+from swiftmap.database.map import Map
+from swiftmap.database.types import GPS, Georeference
 
 try:
     from pymap3d import geodetic2enu
@@ -24,9 +27,34 @@ except ImportError:  # pragma: no cover
 class GpsTransformer:
     """Fits a local->GPS similarity transform (Umeyama + ICP) and builds a Georeference."""
 
-    def calibrate(self, slam_xyz: np.ndarray, gps_lla: np.ndarray,
-                  use_icp: bool = True) -> Dict[str, Any]:
-        """Solve the local->GPS similarity transform; returns a config dict."""
+    def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Fit the local->ENU transform from the Map's keyframe GPS and attach it."""
+        params = {"use_icp": False}
+        if processing_params:
+            params.update(processing_params)
+
+        pt = map.get_pointcloud()
+        if pt is None or not pt.cameras:
+            return {"error": "No reconstruction with camera poses yet"}
+
+        cams = pt.camera_centers()
+        pairs = [(c, g) for c, g in zip(cams, map.get_keyframe_gps()) if g is not None]
+        if len(pairs) < 3:
+            return {"error": f"Only {len(pairs)} keyframes carry GPS; need at least 3"}
+
+        slam = np.array([c for c, _ in pairs], dtype=float)
+        lla = np.array([[g.latitude, g.longitude, g.altitude or 0.0] for _, g in pairs], dtype=float)
+        try:
+            georef = self._calibrate(slam, lla, use_icp=params["use_icp"])
+        except Exception as e:
+            return {"error": f"GPS alignment failed: {e}"}
+
+        map.update_georeference(georef)
+        return {"success": True, "georeference": georef}
+
+    def _calibrate(self, slam_xyz: np.ndarray, gps_lla: np.ndarray,
+                   use_icp: bool = True) -> Georeference:
+        """Solve the local->ENU similarity transform for paired camera centres and GPS."""
         if not PYMAP3D_AVAILABLE:
             raise ImportError("pymap3d is required for GPS alignment")
         slam = np.asarray(slam_xyz, dtype=float).reshape(-1, 3)
@@ -40,50 +68,13 @@ class GpsTransformer:
 
         k = min(len(slam), len(enu))
         s_idx, d_idx = self._resample_indices(k, len(slam)), self._resample_indices(k, len(enu))
-        s0, R0, t0 = self._umeyama(slam[s_idx].T, enu[d_idx].T, with_scale=True)
-        init_fit = (s0 * (R0 @ slam[s_idx].T) + t0).T
-        init_rmse = float(np.sqrt(((init_fit - enu[d_idx]) ** 2).sum(1).mean()))
-
+        s, R, t = self._umeyama(slam[s_idx].T, enu[d_idx].T, with_scale=True)
+        rmse = float(np.sqrt((((s * (R @ slam[s_idx].T) + t).T - enu[d_idx]) ** 2).sum(1).mean()))
         if use_icp:
-            s, R, t, rmse = self._icp_sim3(slam, enu, s0, R0, t0)
-        else:
-            s, R, t, rmse = s0, R0, t0, init_rmse
+            s, R, t, rmse = self._icp_sim3(slam, enu, s, R, t)
 
-        return {"scale": float(s), "rotation": np.asarray(R).tolist(),
-                "translation": np.asarray(t).flatten().tolist(),
-                "lat0": float(lat0), "lon0": float(lon0), "alt0": float(alt0),
-                "init_rmse": init_rmse, "rmse": float(rmse), "num_points": int(k)}
-
-    def from_calibration(self, slam_xyz: np.ndarray, gps_lla: np.ndarray,
-                         use_icp: bool = True) -> Tuple[Any, Dict[str, Any]]:
-        """Fit and return (Georeference, cfg)."""
-        from swiftmap.core.database.georeference import Georeference
-        cfg = self.calibrate(slam_xyz, gps_lla, use_icp=use_icp)
-        return Georeference(cfg), cfg
-
-    @staticmethod
-    def load_gps_csv(path: str) -> np.ndarray:
-        """Load a GPS CSV (latitude/longitude/altitude) into an (M,3) [lat,lon,alt] array."""
-        import csv
-        rows = []
-        with open(path, newline="") as f:
-            reader = csv.DictReader(f)
-            cols = {c.lower(): c for c in (reader.fieldnames or [])}
-            lat_c = cols.get("latitude") or cols.get("lat")
-            lon_c = cols.get("longitude") or cols.get("lon")
-            alt_c = cols.get("altitude") or cols.get("height") or cols.get("alt")
-            if not (lat_c and lon_c and alt_c):
-                raise ValueError(f"GPS CSV must have latitude/longitude/altitude columns; got {reader.fieldnames}")
-            for r in reader:
-                rows.append([float(r[lat_c]), float(r[lon_c]), float(r[alt_c])])
-        return np.asarray(rows, dtype=float)
-
-    @staticmethod
-    def gps_tag(points, georef):
-        """[lat, lon, alt] for a point or (N,3) points, or None if not GPS-aligned."""
-        if georef is None:
-            return None
-        return georef.to_lla(np.asarray(points, dtype=float))
+        print(f"GPS aligned: scale={s:.4f}, RMSE={rmse:.3f} m ({k} points)")
+        return Georeference(s, R, np.asarray(t).flatten(), GPS(lat0, lon0, alt0))
 
     # --------------------------------------------------------- registration math
     @staticmethod

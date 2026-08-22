@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 
 from swiftmap.database.map import Map
-from swiftmap.database.types import Georeference
+from swiftmap.database.types import GPS, Georeference
 import numpy as np
 import pymap3d
 
@@ -70,7 +70,7 @@ def _enu_frame_rotation(gt: Georeference, origin_lla) -> np.ndarray:
     """Rotation from a map's own ENU frame into the common ENU frame (tangent tilt)."""
     probe = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
     lat, lon, alt = pymap3d.enu2geodetic(probe[:, 0], probe[:, 1], probe[:, 2],
-                                         gt.lat0, gt.lon0, gt.alt0)
+                                         *gt.lla0)
     e, n, u = pymap3d.geodetic2enu(lat, lon, alt, *origin_lla)
     p = np.column_stack([e, n, u])
     u_, _, vt = np.linalg.svd((p[1:] - p[0]).T)
@@ -98,7 +98,7 @@ def _merge(parts, origin=None, voxel_size: float = 0.1):
     in the common ENU frame about ``origin`` (default: the first part's), voxel-collapsed."""
     parts = list(parts)
     first = parts[0][3]
-    origin = origin or (first.lat0, first.lon0, first.alt0)
+    origin = origin or first.lla0
     pts, cols, conf, frames = [], [], [], []
     for p, c, cf, gt, frs in parts:
         pts.append(gt.to_enu(p, origin))
@@ -107,7 +107,5 @@ def _merge(parts, origin=None, voxel_size: float = 0.1):
         frames += _transform_frames(frs, gt, origin)
     mpts, mcols, mconf = _voxel_merge(np.vstack(pts), np.vstack(cols),
                                      np.concatenate(conf), voxel_size)
-    identity = Georeference({"scale": 1.0, "rotation": np.eye(3).tolist(),
-                             "translation": [0.0, 0.0, 0.0],
-                             "lat0": origin[0], "lon0": origin[1], "alt0": origin[2]})
+    identity = Georeference(1.0, np.eye(3), [0.0, 0.0, 0.0], GPS(*origin))
     return mpts, mcols, mconf, identity, frames

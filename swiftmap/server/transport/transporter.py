@@ -6,7 +6,7 @@ TCP Server for SwiftMap Mapping System
 Receives frame+GPS pairs from a drone client over TCP. Each frame is checked against
 ``keyframe_selector``; keyframes are saved to disk and appended to the open batch. Once
 the batch reaches ``batch_size`` it is queued, ready for ``next_map()`` to hand to a
-reconstruction worker. The wire format lives in ``swiftmap.core.transport.protocol``.
+reconstruction worker. The wire format lives in ``swiftmap.server.transport.protocol``.
 """
 
 import os
@@ -20,10 +20,11 @@ import numpy as np
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
-from swiftmap.core import constants
-from swiftmap.core.transport import protocol
-from swiftmap.core.transport.keyframe_selector import KeyframeSelector
+from swiftmap import constants
+from swiftmap.server.transport import protocol
+from swiftmap.server.transport.keyframe_selector import KeyframeSelector
 from swiftmap.database.map import Map
+from swiftmap.database.types import GPS
 
 
 class Transporter:
@@ -315,14 +316,20 @@ class Transporter:
         self._batches.put(self._close_batch(batch))
 
     def _close_batch(self, batch: List[Dict[str, Any]]) -> Map:
-        """Create the batch's Map and move its keyframes into the map's images/."""
+        """Create the batch's Map, move its keyframes into images/, record paired GPS."""
         map_ = self.db.create_map()
+        images, gps = [], []
         for i, e in enumerate(batch):
-            dst = os.path.join(map_.images_dir, f"frame_{i:06d}.jpg")
+            name = f"frame_{i:06d}.jpg"
             try:
-                os.replace(e["path"], dst)
+                os.replace(e["path"], os.path.join(map_.images_dir, name))
             except OSError as err:
-                print(f"Error moving keyframe {e['path']} -> {dst}: {err}")
+                print(f"Error moving keyframe {e['path']} -> {name}: {err}")
+                continue
+            images.append(name)
+            g = e.get("gps")
+            gps.append(GPS(g[0], g[1], g[2]) if g else None)
+        map_.update_keyframes(images, gps)
         return map_
 
     def next_map(self) -> Optional[Map]:

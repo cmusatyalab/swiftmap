@@ -8,11 +8,10 @@ from typing import Any, Dict, List
 import numpy as np
 import torch
 
-from swiftmap.core import constants
+from swiftmap import constants
 from swiftmap.core.pipeline.reconstructor.base import BaseReconstructor
-from swiftmap.core.pipeline.reconstructor.pose import camera_poses_from_extrinsics
 from swiftmap.core.pipeline.reconstructor.registry import register_reconstructor
-from swiftmap.database.types import PointCloud
+from swiftmap.database.types import CameraPose, PointCloud
 
 
 def _unproject_depth_map_to_point_map(depth_map: np.ndarray,
@@ -114,7 +113,6 @@ class VGGTOmegaReconstructor(BaseReconstructor):
         world_points = _unproject_depth_map_to_point_map(
             processed["depth"], processed["extrinsic"], processed["intrinsic"])
 
-        positions, rotations = camera_poses_from_extrinsics(processed["extrinsic"])
         return PointCloud(
             world_points=world_points,
             world_points_conf=processed.get("depth_conf"),
@@ -123,8 +121,7 @@ class VGGTOmegaReconstructor(BaseReconstructor):
             images=processed.get("images"),
             extrinsic=processed["extrinsic"],
             intrinsic=processed["intrinsic"],
-            camera_positions=positions,
-            camera_rotations=rotations,
+            cameras=[CameraPose.from_extrinsic(e) for e in processed["extrinsic"]],
             metadata={
                 "keyframe_paths": keyframe_paths,
                 "num_keyframes": len(keyframe_paths),

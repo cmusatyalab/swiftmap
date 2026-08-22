@@ -2,18 +2,27 @@
 
 """Minimal headless auto-mapping server.
 
-Starts a ``MappingSession`` and keeps it running until stopped -- a thin process
-wrapper so the session can be driven over TCP (e.g. by ``test/test_client.py``).
-Everything past collection + reconstruction (GPS alignment, NFN, site growth,
-segmentation) is not wired up yet.
+Owns the run: the TCP transport that collects and batches keyframes, the socket
+thread that serves it, and the worker thread that feeds each closed Map through a
+``MappingSession``. A run goes:
+
+    drone --TCP--> Transporter selects, batches, creates a Map   (socket thread)
+    worker thread: next_map() -> session.process(map)            (worker thread)
+
+Site growth and segmentation are not wired up yet.
 """
 
 import os
+import tempfile
+import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Optional
 
-from swiftmap.core import constants
-from swiftmap.core.transport import protocol
+from swiftmap import constants
+from swiftmap.server.transport import protocol
+from swiftmap.server.transport.transporter import Transporter
 from swiftmap.core.session import MappingSession
 
 
@@ -30,31 +39,102 @@ class ServerConfig:
 
 
 class AutoMappingServer:
-    """Starts a MappingSession's TCP collection + reconstruction worker; blocks until stopped."""
+    """Runs the TCP transport and drives each collected Map through the pipeline."""
 
     def __init__(self, config: ServerConfig):
         self.cfg = config
         os.makedirs(config.output_dir, exist_ok=True)
-        root = os.path.abspath(config.output_dir)
 
-        self.session = MappingSession(
-            host=config.host, min_disparity=config.min_disparity,
-            root=root, site=config.site,
-            backbone=[config.backbone, config.segmenter],
-        )
-        self.session.batch_size = config.batch_size
+        self.session = MappingSession(root=os.path.abspath(config.output_dir),
+                                      site=config.site,
+                                      backbone=[config.backbone, config.segmenter])
+
+        # transport
+        self.transporter: Optional[Transporter] = None
+        self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_session_")  # scratch dir for keyframe JPEGs
+
+        # run state
+        self.is_running = False
+        self.transport_thread = None
+        self.pipeline_thread = None
+        self.start_time = None
+
+    # =============================================================== lifecycle
+    def start(self) -> bool:
+        """Start the TCP transport and the worker that maps each closed batch."""
+        if self.is_running:
+            print("Server already running")
+            return True
+
+        self.transporter = Transporter(self.cfg.batch_size, self.session.db,
+                                       min_disparity=self.cfg.min_disparity,
+                                       host=self.cfg.host, port=self.cfg.port,
+                                       temp_dir=self.temp_dir)
+
+        print(f"[swiftmap-server] starting on {self.cfg.host}:{self.cfg.port} "
+              f"(backbone={self.cfg.backbone}, batch_size={self.cfg.batch_size}, "
+              f"min disparity={self.cfg.min_disparity} px)")
+
+        self.start_time = datetime.now()
+        self.transport_thread = threading.Thread(target=self.transporter.start_server, daemon=True)
+        self.transport_thread.start()
+
+        self.pipeline_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.pipeline_thread.start()
+
+        self.is_running = True
+        print("[swiftmap-server] ready to receive drone images")
+        return True
 
     def run(self):
-        """Start the session and block until interrupted."""
-        print(f"[swiftmap-server] starting on {self.cfg.host}:{self.cfg.port} "
-              f"(backbone={self.cfg.backbone}, batch_size={self.cfg.batch_size})")
-        if not self.session.start(port=self.cfg.port):
+        """Start the server and block until interrupted."""
+        if not self.start():
             raise RuntimeError("Failed to start the TCP collection server")
-
         try:
             while True:
                 time.sleep(1.0)
         except KeyboardInterrupt:
             print("[swiftmap-server] interrupted")
         finally:
-            self.session.stop()
+            self.stop()
+
+    def stop(self):
+        """Stop the transport and worker (the session and its models stay alive)."""
+        if not self.is_running:
+            return
+        print("[swiftmap-server] stopping...")
+        self.is_running = False
+        if self.transporter:
+            self.transporter.stop_server()
+        if self.transport_thread:
+            self.transport_thread.join(timeout=2.0)
+        if self.pipeline_thread:
+            self.pipeline_thread.join(timeout=5.0)
+        print("[swiftmap-server] stopped")
+
+    def _worker_loop(self):
+        """Block on the next full Map and run the pipeline over it, until stop() unblocks it."""
+        while True:
+            map_ = self.transporter.next_map()
+            if map_ is None:
+                break
+            result = self.session.process(map_)
+            if "error" in result:
+                print(f"[swiftmap-server] {result['error']}")
+
+    # ============================================================ helper
+    def send_to_client(self, payload: bytes):
+        """Deliver payload back to the connected client"""
+        if self.transporter:
+            self.transporter.queue_outbound(payload)
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Combined run statistics (selection + transport)."""
+        stats = {}
+        if self.transporter:
+            stats = self.transporter.keyframe_selector.get_stats()
+            stats["transporter_stats"] = self.transporter.get_stats()
+            stats["keyframes_selected"] = self.transporter.total_keyframes_selected
+        if self.start_time:
+            stats["session_duration"] = str(datetime.now() - self.start_time)
+        return stats

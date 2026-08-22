@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import trimesh
 
-from swiftmap.core import constants
+from swiftmap import constants
 from swiftmap.core.database.map import Map
 from swiftmap.core.pipeline import utils as pipeline_utils
 from swiftmap.core.database import cloud as arrays

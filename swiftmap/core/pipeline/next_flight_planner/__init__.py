@@ -5,6 +5,6 @@ Plans where to fly next: points inside the [P_low, P_high) confidence band are t
 marginally-mapped regions, clustered into suggested viewpoints. See
 ``planner.NextFlightPlanner``."""
 
-from .planner import NextFlightPlanner, write_plan
+from .planner import NextFlightPlanner
 
-__all__ = ["NextFlightPlanner", "write_plan"]
+__all__ = ["NextFlightPlanner"]
