@@ -4,7 +4,6 @@ import numpy as np
 
 # ================================================================== shared
 
-
 class GPS:
     """
     A class representing a GPS coordinate with latitude and longitude.
@@ -17,10 +16,6 @@ class GPS:
 
     def __repr__(self):
         return f"GPS(latitude={self.latitude}, longitude={self.longitude}, altitude={self.altitude})"
-
-
-# =========================================================== reconstructor
-
 
 class CameraPose:
     """One keyframe's world pose: camera centre and camera-to-world rotation."""
@@ -53,6 +48,7 @@ class PointCloud:
                  intrinsic: Optional[np.ndarray] = None,                  # (S, 3, 3)
                  cameras: Optional[List[CameraPose]] = None,
                  metadata: Optional[dict] = None):
+        # ---- reconstructor
         self.world_points = world_points
         self.world_points_conf = world_points_conf
         self.world_points_from_depth = world_points_from_depth
@@ -63,8 +59,12 @@ class PointCloud:
         self.cameras: List[CameraPose] = cameras or []
         self.metadata = metadata or {}
 
+        # ---- segmentor
+        self.segmented_worldpoints: List["SegmentedTarget"] = []
+
         self.scene = None                # trimesh.Scene -- scene.glb
-        self.confidence_scene = None     # trimesh.Scene -- confidence_map.glb
+        self.confidence_scene = None     # trimesh.Scene -- scene_confidence.glb
+        self.segmented_scene = None      # trimesh.Scene -- seg_scene.glb
         self.camera_poses = None         # dict -- camera_poses.json payload
         self.model_input = None          # [(filename, jpeg bytes)] -- model_input/
 
@@ -101,6 +101,17 @@ class PointCloud:
         """Camera positions as (S, 3)."""
         return np.array([c.position for c in self.cameras], dtype=float).reshape(-1, 3)
 
+    def add_segmentation(self, query: str, points: np.ndarray) -> "SegmentedTarget":
+        """Append one query's lifted points, giving it a hue no earlier target has used."""
+        import colorsys
+        self.segmented_worldpoints = [t for t in self.segmented_worldpoints if t.query != query]
+        hue = (len(self.segmented_worldpoints) * 0.6180339887) % 1.0     # golden-angle spacing
+        color = np.array([int(255 * v) for v in colorsys.hsv_to_rgb(hue, 0.9, 1.0)],
+                         dtype=np.uint8)
+        target = SegmentedTarget(query, points, color)
+        self.segmented_worldpoints.append(target)
+        return target
+
     def to_las(self, georef: "Georeference", percentile: float = 0.0,
                conf: Optional[np.ndarray] = None):
         """LAS 1.4 (format 7) point cloud in the georeference's UTM zone: XYZ + RGB + intensity.
@@ -129,6 +140,7 @@ class PointCloud:
                          ).astype(np.uint16)
         return las
 
+# ========================================================= reconstructor
 
 # ========================================================= gps transformer
 
@@ -391,3 +403,18 @@ class FlightPlan:
       <Pair><key>normal</key><styleUrl>#poly-000000-1200-77-nodesc-normal</styleUrl></Pair>
       <Pair><key>highlight</key><styleUrl>#poly-000000-1200-77-nodesc-highlight</styleUrl></Pair>
     </StyleMap>"""
+
+
+# ================================================================ segmentor
+
+
+class SegmentedTarget:
+    """One text query lifted to 3D: the world points whose pixels matched it."""
+
+    def __init__(self, query: str, points: np.ndarray, color: np.ndarray):
+        self.query = query
+        self.points = points          # (M, 3) local reconstruction coords
+        self.color = color            # (3,) uint8, this target's scene colour
+
+    def __repr__(self):
+        return f"SegmentedTarget(query={self.query!r}, num_points={len(self.points)})"

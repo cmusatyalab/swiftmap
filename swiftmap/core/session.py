@@ -20,7 +20,7 @@ from swiftmap.database import Database
 from swiftmap.database.map import Map
 from swiftmap.core.pipeline.reconstructor import get_reconstructor, BaseReconstructor
 from swiftmap.core.pipeline.next_flight_planner import NextFlightPlanner
-# from swiftmap.core.pipeline.segmentor import get_segmenter, lift  # broken, not needed to start the session
+from swiftmap.core.pipeline.segmentor import get_segmenter, BaseSegmenter
 from swiftmap.core.pipeline.gps_transformer import GpsTransformer
 
 
@@ -38,7 +38,7 @@ class MappingSession:
         self.reconstructor: BaseReconstructor = get_reconstructor(backbone[0])
         self.aligner = GpsTransformer()
         self.planner = NextFlightPlanner()
-        self.segmenter = None  # get_segmenter(backbone[1])  # broken, not needed to start the session
+        self.segmenter: BaseSegmenter = get_segmenter(backbone[1])
 
     # =============================================================== pipeline
     def process(self, map_: Map, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -75,3 +75,10 @@ class MappingSession:
         return self.planner.run(map_, params)
 
     # --------------------------------------------------------- segmentation
+    def segment(self, map_: Map, query: str,
+                params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Segment one text query over a reconstructed Map and lift it into 3D."""
+        result = self.segmenter.run(map_, {**(params or {}), "query": query})
+        if "success" in result:
+            map_.write2disk()
+        return result

@@ -98,6 +98,9 @@ class Map:
             if pt.confidence_scene is not None:
                 pt.confidence_scene.export(os.path.join(self.path, "scene_confidence.glb"))
 
+            if pt.segmented_scene is not None:
+                pt.segmented_scene.export(os.path.join(self.path, "seg_scene.glb"))
+
             if pt.camera_poses is not None:
                 with open(os.path.join(self.path, "camera_poses.json"), "w") as f:
                     json.dump(pt.camera_poses, f, indent=2)
