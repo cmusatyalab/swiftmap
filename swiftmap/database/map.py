@@ -113,6 +113,9 @@ class Map:
             with open(os.path.join(self.path, "transform.json"), "w") as f:
                 json.dump(self.gps_aligned_results.to_json(), f, indent=2)
 
+            if pt is not None and pt.world_points is not None:
+                pt.to_las(self.gps_aligned_results).write(os.path.join(self.path, "scene.laz"))
+
         if self.flight_plan is not None:
             with open(os.path.join(self.path, "next_flight_viewpoints.json"), "w") as f:
                 json.dump(self.flight_plan.to_json(), f, indent=2)
@@ -120,3 +123,10 @@ class Map:
             if kml is not None:
                 with open(os.path.join(self.path, "next_flight_viewpoints.kml"), "w") as f:
                     f.write(kml)
+            area_kml = self.flight_plan.to_polygon_kml()
+            if area_kml is not None:
+                with open(os.path.join(self.path, "next_flight_area.kml"), "w") as f:
+                    f.write(area_kml)
+
+        from swiftmap.database import gdb
+        gdb.write_gdb(self, os.path.join(self.path, "map.gdb"))

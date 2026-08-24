@@ -21,12 +21,14 @@ The planner works in ENU metres throughout, so every distance is a real metre an
 per-cluster golden-angle heading is a true compass azimuth. It requires a GPS-aligned Map.
 """
 
+import time
+
 import numpy as np
 
 from typing import Any, Dict, List, Optional
 from swiftmap.core.pipeline.next_flight_planner import postprocess
 from swiftmap.database.map import Map
-from swiftmap.database.types import CameraPose, Cluster, Viewpoint
+from swiftmap.database.types import CameraPose, Cluster, FlightPlan, Viewpoint
 
 
 class NextFlightPlanner:
@@ -55,8 +57,9 @@ class NextFlightPlanner:
             "max_viewpoints": 20,
         }
 
-    def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict:
+    def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         # process params
+        planning_start = time.time()
         params = self.default_params.copy()
         if processing_params:
             params.update(processing_params)
@@ -131,23 +134,27 @@ class NextFlightPlanner:
         order = np.argsort([-v.score for v in viewpoints])[:params["max_viewpoints"]]
         viewpoints = [viewpoints[i] for i in order]
 
-        plan = {
-            "viewpoints": viewpoints,
-            "clusters": clusters,
-            "thresholds": {
+        flight_plan = FlightPlan(
+            viewpoints=viewpoints,
+            clusters=clusters,
+            thresholds={
                 "low_percentile": params["low_percentile"],
                 "high_percentile": params["high_percentile"],
                 "p_low": p_low, "p_high": p_high,
             },
-            "statistics": {
+            statistics={
                 "num_enhance_points": int(len(enhance_pts)),
                 "num_clusters": len(clusters),
                 "scene_extent_m": extent, "cell_size_m": cell, "standoff_m": standoff,
             },
-        }
-        postprocess.generate_flight_plan(map, plan)
-        map.write2disk()
-        return plan
+        )
+        postprocess.generate_flight_plan(map, flight_plan)
+
+        planning_time = time.time() - planning_start
+        print(f"[NFN] {len(viewpoints)} viewpoints over {len(clusters)} clusters "
+              f"({extent:.1f} m scene) in {planning_time:.2f}s")
+        return {"success": True, "flight_plan": flight_plan, "timing": {"planning": planning_time}}
+
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -178,18 +185,8 @@ class NextFlightPlanner:
         y = np.cross(z, x)
         return np.column_stack([x, y, z]).astype(np.float32)
 
-    def _empty(self, msg, params=None, enhance_pts=None, p_low=0.0, p_high=0.0, extent=0.0) -> Dict:
-        """Empty plan carrying the reason it could not be built."""
+    @staticmethod
+    def _empty(msg, *_) -> Dict[str, Any]:
+        """No plan, carrying the reason it could not be built."""
         print(f"[NFN] {msg}")
-        params = params or self.default_params
-        return {
-            "error": msg,
-            "enhance_points": enhance_pts if enhance_pts is not None else np.empty((0, 3)),
-            "clusters": [], "viewpoints": [], "num_viewpoints": 0,
-            "thresholds": {
-                "low_percentile": params["low_percentile"],
-                "high_percentile": params["high_percentile"],
-                "p_low": p_low, "p_high": p_high,
-            },
-            "statistics": {"message": msg, "scene_extent_m": extent},
-        }
+        return {"error": msg}

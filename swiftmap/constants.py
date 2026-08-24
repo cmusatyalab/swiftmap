@@ -12,7 +12,7 @@ GUI_PORT = 7866      # Gradio web interface
 # Minimum mean optical-flow disparity (px) for a frame to be kept as a keyframe.
 DEFAULT_MIN_DISPARITY = 40.0
 # After selection, the keyframe set sent to VGGT is capped to this many (0 = no cap).
-DEFAULT_MAX_KEYFRAMES = 70
+DEFAULT_MAX_KEYFRAMES = 20
 
 # --- Reconstruction / confidence -------------------------------------------
 # Confidence threshold (percentile, %) used when filtering the point cloud.

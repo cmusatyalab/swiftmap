@@ -5,6 +5,8 @@
 trajectory to a GPS trace and builds the ``Georeference`` (in
 ``swiftmap.core.database``) that applies it."""
 
+import time
+
 import numpy as np
 from typing import Any, Dict, Optional
 
@@ -29,6 +31,7 @@ class GpsTransformer:
 
     def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Fit the local->ENU transform from the Map's keyframe GPS and attach it."""
+        align_start = time.time()
         params = {"use_icp": False}
         if processing_params:
             params.update(processing_params)
@@ -50,7 +53,9 @@ class GpsTransformer:
             return {"error": f"GPS alignment failed: {e}"}
 
         map.update_georeference(georef)
-        return {"success": True, "georeference": georef}
+        align_time = time.time() - align_start
+        print(f"[GPS] alignment completed in {align_time:.2f}s")
+        return {"success": True, "georeference": georef, "timing": {"alignment": align_time}}
 
     def _calibrate(self, slam_xyz: np.ndarray, gps_lla: np.ndarray,
                    use_icp: bool = True) -> Georeference:

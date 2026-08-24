@@ -23,6 +23,10 @@ dependencies = [
     "matplotlib",
     "requests",
     "pymap3d",          # ENU <-> geodetic (GPS) conversion for geo-alignment
+    "pyproj",           # geodetic -> UTM for the georeferenced LAS export
+    "laspy[lazrs]",     # scene.laz -- the point cloud GIS/photogrammetry tools ingest
+    "pyogrio",          # map.gdb -- Esri File Geodatabase vector layers (bundles GDAL)
+    "shapely",          # feature geometry for the geodatabase layers
     "gradio==5.17.1",
 
     # Sky masking via skyseg.onnx (model auto-downloaded on first use).

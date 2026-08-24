@@ -2,6 +2,9 @@ from typing import List, Optional
 
 import numpy as np
 
+# ================================================================== shared
+
+
 class GPS:
     """
     A class representing a GPS coordinate with latitude and longitude.
@@ -16,50 +19,7 @@ class GPS:
         return f"GPS(latitude={self.latitude}, longitude={self.longitude}, altitude={self.altitude})"
 
 
-
-class Georeference:
-    """Similarity transform from local reconstruction coords to ENU metres about an origin."""
-
-    def __init__(self, scale: float, rotation, translation, origin: GPS):
-        self.scale = float(scale)
-        self.R = np.asarray(rotation, dtype=float).reshape(3, 3)
-        self.t = np.asarray(translation, dtype=float).reshape(3)
-        self.origin = origin
-        self.lla0 = (origin.latitude, origin.longitude, origin.altitude or 0.0)
-
-    def __repr__(self):
-        return f"Georeference(scale={self.scale:.4f}, origin={self.origin})"
-
-    def to_enu(self, points, origin=None) -> np.ndarray:
-        """Local points -> ENU metres; re-based on ``origin`` (lat, lon, alt) if given."""
-        pts = np.asarray(points, dtype=float).reshape(-1, 3)
-        enu = self.scale * (pts @ self.R.T) + self.t
-        if origin is not None and tuple(origin) != self.lla0:
-            import pymap3d
-            lat, lon, alt = pymap3d.enu2geodetic(enu[:, 0], enu[:, 1], enu[:, 2], *self.lla0)
-            e, n, u = pymap3d.geodetic2enu(lat, lon, alt, *origin)
-            enu = np.column_stack([e, n, u])
-        return enu
-
-    def to_lla(self, points) -> np.ndarray:
-        """Local points -> (N, 3) [lat, lon, alt]."""
-        return self.enu_to_lla(self.to_enu(points))
-
-    def enu_to_lla(self, enu) -> np.ndarray:
-        """ENU metres (about this origin) -> (N, 3) [lat, lon, alt]."""
-        import pymap3d
-        enu = np.asarray(enu, dtype=float).reshape(-1, 3)
-        lat, lon, alt = pymap3d.enu2geodetic(enu[:, 0], enu[:, 1], enu[:, 2], *self.lla0)
-        return np.column_stack([lat, lon, alt])
-
-    def to_json(self) -> dict:
-        """transform.json payload."""
-        return {"scale": self.scale,
-                "rotation": self.R.tolist(),
-                "translation": self.t.tolist(),
-                "origin": {"latitude": self.lla0[0], "longitude": self.lla0[1],
-                           "altitude": self.lla0[2]}}
-
+# =========================================================== reconstructor
 
 
 class CameraPose:
@@ -141,6 +101,98 @@ class PointCloud:
         """Camera positions as (S, 3)."""
         return np.array([c.position for c in self.cameras], dtype=float).reshape(-1, 3)
 
+    def to_las(self, georef: "Georeference", percentile: float = 0.0,
+               conf: Optional[np.ndarray] = None):
+        """LAS 1.4 (format 7) point cloud in the georeference's UTM zone: XYZ + RGB + intensity.
+
+        Confidence becomes LAS intensity, rescaled to uint16. ``conf`` overrides the
+        stored confidence (e.g. a sky-masked copy), matching confidence_mask().
+        """
+        import laspy
+        from pyproj import CRS
+
+        keep = self.confidence_mask(percentile, conf)
+        xyz = georef.to_utm(self.flatten_points()[keep])
+        rgb = self.flatten_colors()[keep]
+        c = (self.flatten_conf() if conf is None else conf.reshape(-1).astype(float))[keep]
+
+        header = laspy.LasHeader(version="1.4", point_format=7)
+        header.offsets = np.floor(xyz.min(axis=0))   # keeps the int32 payload small
+        header.scales = np.array([0.001, 0.001, 0.001])
+        header.add_crs(CRS.from_epsg(georef.utm_epsg))
+
+        las = laspy.LasData(header)
+        las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+        las.red, las.green, las.blue = (rgb[:, i].astype(np.uint16) * 257 for i in range(3))
+        lo, hi = float(c.min()), float(c.max())
+        las.intensity = (((c - lo) / (hi - lo) if hi > lo else np.ones_like(c)) * 65535
+                         ).astype(np.uint16)
+        return las
+
+
+# ========================================================= gps transformer
+
+
+class Georeference:
+    """Similarity transform from local reconstruction coords to ENU metres about an origin."""
+
+    def __init__(self, scale: float, rotation, translation, origin: GPS):
+        self.scale = float(scale)
+        self.R = np.asarray(rotation, dtype=float).reshape(3, 3)
+        self.t = np.asarray(translation, dtype=float).reshape(3)
+        self.origin = origin
+        self.lla0 = (origin.latitude, origin.longitude, origin.altitude or 0.0)
+
+    def __repr__(self):
+        return f"Georeference(scale={self.scale:.4f}, origin={self.origin})"
+
+    def to_enu(self, points, origin=None) -> np.ndarray:
+        """Local points -> ENU metres; re-based on ``origin`` (lat, lon, alt) if given."""
+        pts = np.asarray(points, dtype=float).reshape(-1, 3)
+        enu = self.scale * (pts @ self.R.T) + self.t
+        if origin is not None and tuple(origin) != self.lla0:
+            import pymap3d
+            lat, lon, alt = pymap3d.enu2geodetic(enu[:, 0], enu[:, 1], enu[:, 2], *self.lla0)
+            e, n, u = pymap3d.geodetic2enu(lat, lon, alt, *origin)
+            enu = np.column_stack([e, n, u])
+        return enu
+
+    def to_lla(self, points) -> np.ndarray:
+        """Local points -> (N, 3) [lat, lon, alt]."""
+        return self.enu_to_lla(self.to_enu(points))
+
+    def enu_to_lla(self, enu) -> np.ndarray:
+        """ENU metres (about this origin) -> (N, 3) [lat, lon, alt]."""
+        import pymap3d
+        enu = np.asarray(enu, dtype=float).reshape(-1, 3)
+        lat, lon, alt = pymap3d.enu2geodetic(enu[:, 0], enu[:, 1], enu[:, 2], *self.lla0)
+        return np.column_stack([lat, lon, alt])
+
+    def to_json(self) -> dict:
+        """transform.json payload."""
+        return {"scale": self.scale,
+                "rotation": self.R.tolist(),
+                "translation": self.t.tolist(),
+                "origin": {"latitude": self.lla0[0], "longitude": self.lla0[1],
+                           "altitude": self.lla0[2]}}
+
+    @property
+    def utm_epsg(self) -> int:
+        """EPSG code of the WGS84/UTM zone containing this origin."""
+        zone = int((self.lla0[1] + 180.0) / 6.0) + 1
+        return (32600 if self.lla0[0] >= 0 else 32700) + zone
+
+    def to_utm(self, points) -> np.ndarray:
+        """Local points -> (N, 3) [easting, northing, altitude] in this origin's UTM zone."""
+        from pyproj import CRS, Transformer
+        lla = self.to_lla(points)
+        fwd = Transformer.from_crs(CRS.from_epsg(4326), CRS.from_epsg(self.utm_epsg),
+                                   always_xy=True)
+        east, north = fwd.transform(lla[:, 1], lla[:, 0])
+        return np.column_stack([east, north, lla[:, 2]])
+
+
+# ===================================================== next flight planner
 
 
 class Cluster:
@@ -254,7 +306,58 @@ class FlightPlan:
             '</kml>\n'
         )
         return kml
-    
+
+    def to_polygon_kml(self, doc_name: str = "nfn_area",
+                       layer_name: str = "Untitled layer",
+                       placemark_name: str = "nfn_target_area") -> Optional[str]:
+        """Polygon KML whose ring vertices are the viewpoints' target GPS.
+
+        Reads as an area rather than pins. None unless at least 3 targets are
+        GPS-tagged; the ring is ordered around its centroid and closed.
+        """
+        latlons = [(vp.target_gps.latitude, vp.target_gps.longitude)
+                   for vp in self.viewpoints if vp.target_gps is not None]
+        if len(latlons) < 3:
+            return None
+
+        ring = self._order_ring(latlons)
+        ring.append(ring[0])  # close the ring
+        coords = "\n".join(f"                {lon:.7f},{lat:.7f},0" for lat, lon in ring)
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
+            '  <Document>\n'
+            f'    <name>{doc_name}</name>\n'
+            '    <description/>\n'
+            f'{self._POLY_STYLE}\n'
+            '    <Folder>\n'
+            f'      <name>{layer_name}</name>\n'
+            '      <Placemark>\n'
+            f'        <name>{placemark_name}</name>\n'
+            '        <styleUrl>#poly-000000-1200-77-nodesc</styleUrl>\n'
+            '        <Polygon>\n'
+            '          <outerBoundaryIs>\n'
+            '            <LinearRing>\n'
+            '              <tessellate>1</tessellate>\n'
+            '              <coordinates>\n'
+            f'{coords}\n'
+            '              </coordinates>\n'
+            '            </LinearRing>\n'
+            '          </outerBoundaryIs>\n'
+            '        </Polygon>\n'
+            '      </Placemark>\n'
+            '    </Folder>\n'
+            '  </Document>\n'
+            '</kml>\n'
+        )
+
+    @staticmethod
+    def _order_ring(latlons: List[tuple]) -> List[tuple]:
+        """Sort (lat, lon) by polar angle about the centroid: a non-self-intersecting ring."""
+        clat = sum(p[0] for p in latlons) / len(latlons)
+        clon = sum(p[1] for p in latlons) / len(latlons)
+        return sorted(latlons, key=lambda p: np.arctan2(p[0] - clat, p[1] - clon))
+
     _STYLE = """    <Style id="icon-1899-0288D1-nodesc-normal">
     <IconStyle><color>ffd18802</color><scale>1</scale>
         <Icon><href>https://www.gstatic.com/mapspro/images/stock/503-wht-blank_maps.png</href></Icon>
@@ -272,4 +375,19 @@ class FlightPlan:
     <StyleMap id="icon-1899-0288D1-nodesc">
     <Pair><key>normal</key><styleUrl>#icon-1899-0288D1-nodesc-normal</styleUrl></Pair>
     <Pair><key>highlight</key><styleUrl>#icon-1899-0288D1-nodesc-highlight</styleUrl></Pair>
+    </StyleMap>"""
+
+    _POLY_STYLE = """    <Style id="poly-000000-1200-77-nodesc-normal">
+      <LineStyle><color>ff000000</color><width>1.2</width></LineStyle>
+      <PolyStyle><color>4d000000</color><fill>1</fill><outline>1</outline></PolyStyle>
+      <BalloonStyle><text><![CDATA[<h3>$[name]</h3>]]></text></BalloonStyle>
+    </Style>
+    <Style id="poly-000000-1200-77-nodesc-highlight">
+      <LineStyle><color>ff000000</color><width>1.8</width></LineStyle>
+      <PolyStyle><color>4d000000</color><fill>1</fill><outline>1</outline></PolyStyle>
+      <BalloonStyle><text><![CDATA[<h3>$[name]</h3>]]></text></BalloonStyle>
+    </Style>
+    <StyleMap id="poly-000000-1200-77-nodesc">
+      <Pair><key>normal</key><styleUrl>#poly-000000-1200-77-nodesc-normal</styleUrl></Pair>
+      <Pair><key>highlight</key><styleUrl>#poly-000000-1200-77-nodesc-highlight</styleUrl></Pair>
     </StyleMap>"""

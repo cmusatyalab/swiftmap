@@ -54,6 +54,8 @@ class MappingSession:
         plan = self.plan(map_)
         if "error" in plan:
             return {"error": f"NFN failed: {plan['error']}"}
+
+        map_.write2disk()
         return {"success": True, "map": map_}
 
     # ---------------------------------------------------------------- reconstruction
