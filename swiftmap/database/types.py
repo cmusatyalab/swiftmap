@@ -59,13 +59,15 @@ class PointCloud:
         self.cameras: List[CameraPose] = cameras or []
         self.metadata = metadata or {}
 
+        # ---- gps transformer
+        self.geo_scene = None            # trimesh.Scene -- scene_geo.glb (ENU metres)
+
         # ---- segmentor
         self.segmented_worldpoints: List["SegmentedTarget"] = []
 
         self.scene = None                # trimesh.Scene -- scene.glb
         self.confidence_scene = None     # trimesh.Scene -- scene_confidence.glb
         self.segmented_scene = None      # trimesh.Scene -- seg_scene.glb
-        self.camera_poses = None         # dict -- camera_poses.json payload
         self.model_input = None          # [(filename, jpeg bytes)] -- model_input/
 
     def __repr__(self):
@@ -101,6 +103,35 @@ class PointCloud:
         """Camera positions as (S, 3)."""
         return np.array([c.position for c in self.cameras], dtype=float).reshape(-1, 3)
 
+    def to_geojson(self, georef: "Georeference") -> dict:
+        """scene_geo.geojson: where scene_geo.glb's local (0, 0, 0) sits on Earth.
+
+        glTF carries no coordinate system, so the mesh ships with its origin beside it.
+        """
+        return {"type": "FeatureCollection", "features": [{
+            "type": "Feature",
+            "geometry": {"type": "Point",
+                         "coordinates": [georef.lla0[1], georef.lla0[0], georef.lla0[2]]},
+            "properties": {"layer": "scene_origin",
+                           "model": "scene_geo.glb",
+                           "description": "model local (0,0,0); the first keyframe's GPS fix",
+                           "altitude_mode": "absolute",
+                           "scale": georef.scale}}]}
+
+    def cameras_to_kml(self, georef: "Georeference") -> Optional[str]:
+        """camera_poses.kml: a placemark where each keyframe was shot."""
+        if not self.cameras:
+            return None
+        placemarks = "\n".join(
+            f"    <Placemark><name>frame_{i:03d}</name>"
+            f"<Point><altitudeMode>absolute</altitudeMode>"
+            f"<coordinates>{lon:.9f},{lat:.9f},{alt:.3f}</coordinates></Point></Placemark>"
+            for i, (lat, lon, alt) in enumerate(georef.to_lla(self.camera_centers())))
+        return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<kml xmlns="http://www.opengis.net/kml/2.2">\n  <Document>\n'
+                '    <name>camera_poses</name>\n'
+                f'{placemarks}\n  </Document>\n</kml>\n')
+
     def add_segmentation(self, query: str, points: np.ndarray) -> "SegmentedTarget":
         """Append one query's lifted points, giving it a hue no earlier target has used."""
         import colorsys
@@ -112,33 +143,6 @@ class PointCloud:
         self.segmented_worldpoints.append(target)
         return target
 
-    def to_las(self, georef: "Georeference", percentile: float = 0.0,
-               conf: Optional[np.ndarray] = None):
-        """LAS 1.4 (format 7) point cloud in the georeference's UTM zone: XYZ + RGB + intensity.
-
-        Confidence becomes LAS intensity, rescaled to uint16. ``conf`` overrides the
-        stored confidence (e.g. a sky-masked copy), matching confidence_mask().
-        """
-        import laspy
-        from pyproj import CRS
-
-        keep = self.confidence_mask(percentile, conf)
-        xyz = georef.to_utm(self.flatten_points()[keep])
-        rgb = self.flatten_colors()[keep]
-        c = (self.flatten_conf() if conf is None else conf.reshape(-1).astype(float))[keep]
-
-        header = laspy.LasHeader(version="1.4", point_format=7)
-        header.offsets = np.floor(xyz.min(axis=0))   # keeps the int32 payload small
-        header.scales = np.array([0.001, 0.001, 0.001])
-        header.add_crs(CRS.from_epsg(georef.utm_epsg))
-
-        las = laspy.LasData(header)
-        las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-        las.red, las.green, las.blue = (rgb[:, i].astype(np.uint16) * 257 for i in range(3))
-        lo, hi = float(c.min()), float(c.max())
-        las.intensity = (((c - lo) / (hi - lo) if hi > lo else np.ones_like(c)) * 65535
-                         ).astype(np.uint16)
-        return las
 
 # ========================================================= reconstructor
 
@@ -188,20 +192,6 @@ class Georeference:
                 "origin": {"latitude": self.lla0[0], "longitude": self.lla0[1],
                            "altitude": self.lla0[2]}}
 
-    @property
-    def utm_epsg(self) -> int:
-        """EPSG code of the WGS84/UTM zone containing this origin."""
-        zone = int((self.lla0[1] + 180.0) / 6.0) + 1
-        return (32600 if self.lla0[0] >= 0 else 32700) + zone
-
-    def to_utm(self, points) -> np.ndarray:
-        """Local points -> (N, 3) [easting, northing, altitude] in this origin's UTM zone."""
-        from pyproj import CRS, Transformer
-        lla = self.to_lla(points)
-        fwd = Transformer.from_crs(CRS.from_epsg(4326), CRS.from_epsg(self.utm_epsg),
-                                   always_xy=True)
-        east, north = fwd.transform(lla[:, 1], lla[:, 0])
-        return np.column_stack([east, north, lla[:, 2]])
 
 
 # ===================================================== next flight planner
@@ -238,27 +228,6 @@ class Viewpoint:
     def __repr__(self):
         return f"Viewpoint(cluster_id={self.cluster_id}, azimuth={self.azimuth_deg:.0f}deg)"
 
-    @property
-    def look_dir(self) -> np.ndarray:
-        """Unit viewing direction (OpenCV axes: +Z forward)."""
-        return self.pose.rotation[:, 2]
-
-    def to_json(self, id: int) -> dict:
-        """One next_flight_viewpoints.json entry."""
-        item = {
-            "id": id,
-            "cluster_id": self.cluster_id,
-            "position": self.pose.position.tolist(),
-            "look_dir": self.look_dir.tolist(),
-            "target": np.asarray(self.target, dtype=float).tolist(),
-            "azimuth_deg": self.azimuth_deg,
-            "score": self.score,
-        }
-        for key, gps in (("position_gps", self.position_gps), ("target_gps", self.target_gps)):
-            if gps is not None:
-                item[key] = [gps.latitude, gps.longitude, gps.altitude]
-        return item
-
 
 class FlightPlan:
     """A planned next flight: viewpoints in local coords, GPS waypoints once aligned."""
@@ -279,16 +248,6 @@ class FlightPlan:
     def __repr__(self):
         return (f"FlightPlan(num_viewpoints={len(self.viewpoints)}, "
                 f"num_waypoints={len(self.waypoints)})")
-
-    def to_json(self) -> dict:
-        """next_flight_viewpoints.json payload."""
-        return {
-            "num_viewpoints": len(self.viewpoints),
-            "gps_aligned": bool(self.waypoints),
-            "thresholds": self.thresholds,
-            "statistics": self.statistics,
-            "viewpoints": [vp.to_json(i) for i, vp in enumerate(self.viewpoints)],
-        }
 
 
     def to_kml(self, doc_name: str = "flight_plan") -> Optional[str]:

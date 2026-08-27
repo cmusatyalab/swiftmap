@@ -114,11 +114,6 @@ class BaseReconstructor(ABC):
             postprocess.generate_confidence_scene(map, params)
             conf_generate_time = time.time() - conf_generate_start
 
-            # update camera_poses
-            poses_start = time.time()
-            postprocess.generate_camera_poses(map, params)
-            poses_time = time.time() - poses_start
-
             # update model_input
             postprocess.generate_model_input(map)
 
@@ -135,7 +130,6 @@ class BaseReconstructor(ABC):
             print(f"[{self.name}] Postprocessing time: {postprocess_time:.2f}s")
             print(f"[{self.name}] 3D scene generation time: {generation_time:.2f}s")
             print(f"[{self.name}] Confidence map generation time: {conf_generate_time:.2f}s")
-            print(f"[{self.name}] Camera poses generation time: {poses_time:.2f}s")
             print(f"[{self.name}] processing completed in {total_processing_time:.2f}s")
 
             return {
@@ -150,7 +144,6 @@ class BaseReconstructor(ABC):
                     "postprocessing": postprocess_time,
                     "3d_generation": generation_time,
                     "confidence_generation": conf_generate_time,
-                    "camera_poses_generation": poses_time,
                 },
             }
 

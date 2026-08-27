@@ -52,6 +52,32 @@ class Map:
     def images_dir(self) -> str:
         return os.path.join(self.path, "images")
 
+    @property
+    def pointcloud_dir(self) -> str:
+        return os.path.join(self.path, "pointcloud")
+
+    @property
+    def local_dir(self) -> str:
+        """Scenes in the reconstruction's own unitless, camera-aligned coordinates."""
+        return os.path.join(self.pointcloud_dir, "local")
+
+    @property
+    def georeferenced_dir(self) -> str:
+        """The same surface in ENU metres, placed on Earth."""
+        return os.path.join(self.pointcloud_dir, "georeferenced")
+
+    @property
+    def model_input_dir(self) -> str:
+        return os.path.join(self.pointcloud_dir, "model_input")
+
+    @property
+    def georeference_dir(self) -> str:
+        return os.path.join(self.path, "georeference")
+
+    @property
+    def flightplan_dir(self) -> str:
+        return os.path.join(self.path, "nextflightplan")
+
     def get_keyframe_paths(self) -> List[str]:
         """This map's keyframe JPEGs under images/, in capture order."""
         if not os.path.isdir(self.images_dir):
@@ -93,43 +119,46 @@ class Map:
         pt = self.reconstructed_results
         if pt is not None:
             if pt.scene is not None:
-                pt.scene.export(os.path.join(self.path, "scene.glb"))
+                pt.scene.export(self._artifact(self.local_dir, "scene.glb"))
 
             if pt.confidence_scene is not None:
-                pt.confidence_scene.export(os.path.join(self.path, "scene_confidence.glb"))
+                pt.confidence_scene.export(
+                    self._artifact(self.local_dir, "scene_confidence.glb"))
 
             if pt.segmented_scene is not None:
-                pt.segmented_scene.export(os.path.join(self.path, "seg_scene.glb"))
-
-            if pt.camera_poses is not None:
-                with open(os.path.join(self.path, "camera_poses.json"), "w") as f:
-                    json.dump(pt.camera_poses, f, indent=2)
+                pt.segmented_scene.export(self._artifact(self.local_dir, "seg_scene.glb"))
 
             if pt.model_input is not None:
-                model_input_dir = os.path.join(self.path, "model_input")
-                os.makedirs(model_input_dir, exist_ok=True)
                 for name, data in pt.model_input:
-                    with open(os.path.join(model_input_dir, name), "wb") as f:
+                    with open(self._artifact(self.model_input_dir, name), "wb") as f:
                         f.write(data)
 
+            if pt.geo_scene is not None:
+                pt.geo_scene.export(self._artifact(self.georeferenced_dir, "scene_geo.glb"))
+                with open(self._artifact(self.georeferenced_dir, "scene_geo.geojson"), "w") as f:
+                    json.dump(pt.to_geojson(self.gps_aligned_results), f, indent=2)
+                cam_kml = pt.cameras_to_kml(self.gps_aligned_results)
+                if cam_kml is not None:
+                    with open(self._artifact(self.georeferenced_dir, "camera_poses.kml"), "w") as f:
+                        f.write(cam_kml)
+
         if self.gps_aligned_results is not None:
-            with open(os.path.join(self.path, "transform.json"), "w") as f:
+            with open(self._artifact(self.georeference_dir, "transform.json"), "w") as f:
                 json.dump(self.gps_aligned_results.to_json(), f, indent=2)
 
-            if pt is not None and pt.world_points is not None:
-                pt.to_las(self.gps_aligned_results).write(os.path.join(self.path, "scene.laz"))
-
         if self.flight_plan is not None:
-            with open(os.path.join(self.path, "next_flight_viewpoints.json"), "w") as f:
-                json.dump(self.flight_plan.to_json(), f, indent=2)
             kml = self.flight_plan.to_kml()
             if kml is not None:
-                with open(os.path.join(self.path, "next_flight_viewpoints.kml"), "w") as f:
+                with open(self._artifact(self.flightplan_dir,
+                                         "next_flight_viewpoints.kml"), "w") as f:
                     f.write(kml)
             area_kml = self.flight_plan.to_polygon_kml()
             if area_kml is not None:
-                with open(os.path.join(self.path, "next_flight_area.kml"), "w") as f:
+                with open(self._artifact(self.flightplan_dir, "next_flight_area.kml"), "w") as f:
                     f.write(area_kml)
 
-        from swiftmap.database import gdb
-        gdb.write_gdb(self, os.path.join(self.path, "map.gdb"))
+    @staticmethod
+    def _artifact(directory: str, name: str) -> str:
+        """Path to an artifact, creating the directory it belongs in."""
+        os.makedirs(directory, exist_ok=True)
+        return os.path.join(directory, name)

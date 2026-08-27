@@ -1,8 +1,7 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""Builds scene.glb / confidence_map.glb / camera_poses.json content; Map.write2disk() exports it."""
+"""Builds scene.glb / scene_confidence.glb content; Map.write2disk() exports it."""
 
-import copy
 import os
 from datetime import datetime
 from typing import Any, Dict, List
@@ -10,14 +9,13 @@ from typing import Any, Dict, List
 import numpy as np
 import trimesh
 
-from swiftmap import constants
+from swiftmap.core.pipeline.reconstructor.sky_mask import apply_sky_mask
 from swiftmap.database.map import Map
 from swiftmap.database.types import CameraPose
 
-_SKY_MASK_THRESHOLD = 0.1
 _MAX_CONFIDENCE_POINTS = 50000
 _FRUSTUM_SCALE = 0.1
-_FRUSTUM_ALPHA = 70
+_FRUSTUM_ALPHA = 85
 _SCENE_SCALE_PERCENTILES = (5, 95)
 
 
@@ -26,7 +24,7 @@ def generate_3d_scene(map: Map, params: Dict[str, Any]):
     try:
         print("Generating 3D content...")
         pt = map.get_pointcloud()
-        sky_conf = _apply_sky_mask(map) if params.get("mask_sky") else None
+        sky_conf = apply_sky_mask(map) if params.get("mask_sky") else None
 
         keep = pt.confidence_mask(params["conf_threshold"], sky_conf)
         xyz = pt.flatten_points()[keep]
@@ -131,37 +129,6 @@ def _confidence_to_colors(confidence: np.ndarray) -> np.ndarray:
     return colors
 
 
-def generate_camera_poses(map: Map, params: Dict[str, Any]):
-    """Build the camera_poses.json payload and attach it as pt.camera_poses."""
-    pt = map.get_pointcloud()
-    if pt is None or pt.extrinsic is None or pt.intrinsic is None:
-        return None
-
-    keyframe_paths = map.get_keyframe_paths()
-    poses_data = {
-        "metadata": {
-            "description": "Camera poses from SwiftMap Mapping",
-            "backbone": params.get("backbone"),
-            "timestamp": datetime.now().isoformat(),
-            "num_keyframes": len(pt.extrinsic),
-        },
-        "frames": [],
-    }
-    for i, (ext, intr, cam) in enumerate(zip(pt.extrinsic, pt.intrinsic, pt.cameras)):
-        image_name = (os.path.basename(keyframe_paths[i])
-                      if i < len(keyframe_paths) else f"keyframe_{i}")
-        poses_data["frames"].append({
-            "image_name": image_name,
-            "camera_position_world": cam.position.tolist(),
-            "rotation_matrix": cam.rotation.tolist(),
-            "translation_vector": ext[:3, 3].tolist(),
-            "intrinsic_matrix": intr.tolist(),
-            "extrinsic_matrix": ext.tolist(),
-        })
-
-    pt.camera_poses = poses_data
-
-
 def generate_model_input(map: Map):
     """Encode the model-resolution input frames as JPEGs and attach as pt.model_input."""
     import cv2
@@ -180,83 +147,3 @@ def generate_model_input(map: Map):
         if ok:
             encoded.append((f"frame_{i:06d}.jpg", buf.tobytes()))
     pt.model_input = encoded
-
-
-def _apply_sky_mask(map: Map) -> np.ndarray:
-    """Zero confidence on sky pixels for each frame (skyseg.onnx)."""
-    pt = map.get_pointcloud()
-    conf = np.array(pt.world_points_conf, dtype=float)
-    target_dir = map.path
-
-    import cv2
-    import onnxruntime
-
-    images_dir = os.path.join(target_dir, "images")
-    image_list = sorted(os.listdir(images_dir)) if os.path.isdir(images_dir) else []
-    if not image_list:
-        return conf
-    os.makedirs(os.path.join(target_dir, "sky_masks"), exist_ok=True)
-    _, H, W = conf.shape
-
-    if not os.path.exists(constants.SKYSEG_ONNX_PATH):
-        print(f"Downloading skyseg.onnx -> {constants.SKYSEG_ONNX_PATH}")
-        os.makedirs(os.path.dirname(constants.SKYSEG_ONNX_PATH), exist_ok=True)
-        _download_skyseg(constants.SKYSEG_ONNX_URL, constants.SKYSEG_ONNX_PATH)
-
-    session = None
-    masks = []
-    for name in image_list:
-        mask_path = os.path.join(target_dir, "sky_masks", name)
-        if os.path.exists(mask_path):
-            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        else:
-            if session is None:
-                session = onnxruntime.InferenceSession(constants.SKYSEG_ONNX_PATH)
-            mask = _segment_sky(os.path.join(images_dir, name), session, mask_path)
-        if mask.shape[0] != H or mask.shape[1] != W:
-            mask = cv2.resize(mask, (W, H))
-        masks.append(mask)
-
-    binary = (np.array(masks) > _SKY_MASK_THRESHOLD).astype(np.float32)
-    return conf * binary
-
-
-def _segment_sky(image_path, session, mask_path) -> np.ndarray:
-    """Binary mask (255 = non-sky) for one image; also written to mask_path."""
-    import cv2
-    image = cv2.imread(image_path)
-    result = cv2.resize(_run_skyseg(session, (320, 320), image), (image.shape[1], image.shape[0]))
-    out = np.zeros_like(result)
-    out[result < 32] = 255
-    os.makedirs(os.path.dirname(mask_path), exist_ok=True)
-    cv2.imwrite(mask_path, out)
-    return out
-
-
-def _run_skyseg(session, input_size, image) -> np.ndarray:
-    """Run skyseg inference; returns a uint8 [0,255] segmentation map."""
-    import cv2
-    x = cv2.cvtColor(cv2.resize(copy.deepcopy(image), input_size), cv2.COLOR_BGR2RGB)
-    x = (np.asarray(x, np.float32) / 255 - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]
-    x = x.transpose(2, 0, 1).reshape(-1, 3, input_size[0], input_size[1]).astype("float32")
-    out = np.asarray(session.run([session.get_outputs()[0].name],
-                                 {session.get_inputs()[0].name: x})).squeeze()
-    out = (out - out.min()) / (out.max() - out.min()) * 255
-    return out.astype("uint8")
-
-
-def _download_skyseg(url, filename):
-    """Download url to filename, following a single redirect."""
-    import requests
-    response = requests.get(url, allow_redirects=False)
-    response.raise_for_status()
-    if response.status_code == 302:
-        response = requests.get(response.headers["Location"], stream=True)
-        response.raise_for_status()
-    else:
-        print(f"Unexpected status code: {response.status_code}")
-        return
-    with open(filename, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
-    print(f"Downloaded {filename}")
