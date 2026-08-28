@@ -149,13 +149,8 @@ class Map:
         if self.flight_plan is not None:
             kml = self.flight_plan.to_kml()
             if kml is not None:
-                with open(self._artifact(self.flightplan_dir,
-                                         "next_flight_viewpoints.kml"), "w") as f:
+                with open(self._artifact(self.flightplan_dir, "next_flight.kml"), "w") as f:
                     f.write(kml)
-            area_kml = self.flight_plan.to_polygon_kml()
-            if area_kml is not None:
-                with open(self._artifact(self.flightplan_dir, "next_flight_area.kml"), "w") as f:
-                    f.write(area_kml)
 
     @staticmethod
     def _artifact(directory: str, name: str) -> str:

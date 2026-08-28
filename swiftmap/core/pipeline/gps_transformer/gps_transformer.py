@@ -10,6 +10,7 @@ import time
 import numpy as np
 from typing import Any, Dict, Optional
 
+from swiftmap import constants
 from swiftmap.core.pipeline.gps_transformer import postprocess
 from swiftmap.database.map import Map
 from swiftmap.database.types import GPS, Georeference
@@ -33,7 +34,7 @@ class GpsTransformer:
     def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Fit the local->ENU transform from the Map's keyframe GPS and attach it."""
         align_start = time.time()
-        params = {"use_icp": False, "conf_threshold": 0.0}
+        params = {"use_icp": False, "conf_threshold": constants.DEFAULT_CONF_THRESHOLD}
         if processing_params:
             params.update(processing_params)
 

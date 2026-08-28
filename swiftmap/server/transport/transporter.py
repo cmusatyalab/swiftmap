@@ -5,7 +5,7 @@ TCP Server for SwiftMap Mapping System
 
 Receives frame+GPS pairs from a drone client over TCP. Each frame is checked against
 ``keyframe_selector``; keyframes are saved to disk and appended to the open batch. Once
-the batch reaches ``batch_size`` it is queued, ready for ``next_map()`` to hand to a
+the batch reaches ``batch_size`` it is queued, ready for ``next_map_id()`` to hand to a
 reconstruction worker. The wire format lives in ``swiftmap.server.transport.protocol``.
 """
 
@@ -79,7 +79,7 @@ class Transporter:
         os.makedirs(self.temp_dir, exist_ok=True)
 
     # ===================================================================== lifecycle
-    def start_server(self):
+    def start(self):
         """Start the TCP server and begin accepting client connections."""
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -117,11 +117,11 @@ class Transporter:
         except Exception as e:
             print(f"Server error: {e}")
         finally:
-            self.stop_server()
+            self.stop()
 
 
-    def stop_server(self):
-        """Stop the TCP server, unblock a worker waiting on next_map(), clean up."""
+    def stop(self):
+        """Stop the TCP server, unblock a worker waiting on next_map_id(), clean up."""
         print("Stopping SwiftMap Mapping TCP Server...")
         self.is_running = False
 
@@ -131,7 +131,7 @@ class Transporter:
         for thread in self.client_threads:
             thread.join(timeout=1.0)
 
-        self._batches.put(None)  # unblock next_map()
+        self._batches.put(None)  # unblock next_map_id()
 
         print("SwiftMap Mapping TCP Server stopped")
         self.print_final_stats()
@@ -307,13 +307,13 @@ class Transporter:
             return ""
 
     def _add_to_batch(self, path: str, gps):
-        """Append to the open batch; once full, close it into a Map and queue that."""
+        """Append to the open batch; once full, close it into a Map and queue its id."""
         with self._batch_lock:
             self._batch.append({"path": path, "gps": gps})
             if len(self._batch) < self.batch_size:
                 return
             batch, self._batch = self._batch, []
-        self._batches.put(self._close_batch(batch))
+        self._batches.put(self._close_batch(batch).meta.name)
 
     def _close_batch(self, batch: List[Dict[str, Any]]) -> Map:
         """Create the batch's Map, move its keyframes into images/, record paired GPS."""
@@ -332,8 +332,8 @@ class Transporter:
         map_.update_keyframes(images, gps)
         return map_
 
-    def next_map(self) -> Optional[Map]:
-        """Block until a Map is ready. Returns None once ``stop_server`` unblocks it."""
+    def next_map_id(self) -> Optional[str]:
+        """Block until a Map is ready; its id. None once ``stop`` unblocks it."""
         return self._batches.get()
 
     # ========================================================================= stats
@@ -371,7 +371,7 @@ if __name__ == "__main__":
     try:
         if server.initialize():
             print("Test server starting. Use test/test_client.py to test.")
-            server.start_server()
+            server.start()
     except KeyboardInterrupt:
         print("\nShutting down test server...")
-        server.stop_server()
+        server.stop()

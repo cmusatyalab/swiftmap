@@ -7,7 +7,7 @@ thread that serves it, and the worker thread that feeds each closed Map through 
 ``MappingSession``. A run goes:
 
     drone --TCP--> Transporter selects, batches, creates a Map   (socket thread)
-    worker thread: next_map() -> session.process(map)            (worker thread)
+    worker thread: next_map_id() -> session.process(map_id)     (worker thread)
 
 Site growth and segmentation are not wired up yet.
 """
@@ -24,6 +24,7 @@ from swiftmap import constants
 from swiftmap.server.transport import protocol
 from swiftmap.server.transport.transporter import Transporter
 from swiftmap.core.session import MappingSession
+from swiftmap.database import Database
 
 
 @dataclass
@@ -45,9 +46,8 @@ class AutoMappingServer:
         self.cfg = config
         os.makedirs(config.output_dir, exist_ok=True)
 
-        self.session = MappingSession(root=os.path.abspath(config.output_dir),
-                                      site=config.site,
-                                      backbone=[config.backbone, config.segmenter])
+        self.db = Database(os.path.abspath(config.output_dir), config.site)
+        self.session = MappingSession(self.db, backbone=[config.backbone, config.segmenter])
 
         # transport
         self.transporter: Optional[Transporter] = None
@@ -66,7 +66,7 @@ class AutoMappingServer:
             print("Server already running")
             return True
 
-        self.transporter = Transporter(self.cfg.batch_size, self.session.db,
+        self.transporter = Transporter(self.cfg.batch_size, self.db,
                                        min_disparity=self.cfg.min_disparity,
                                        host=self.cfg.host, port=self.cfg.port,
                                        temp_dir=self.temp_dir)
@@ -76,7 +76,7 @@ class AutoMappingServer:
               f"min disparity={self.cfg.min_disparity} px)")
 
         self.start_time = datetime.now()
-        self.transport_thread = threading.Thread(target=self.transporter.start_server, daemon=True)
+        self.transport_thread = threading.Thread(target=self.transporter.start, daemon=True)
         self.transport_thread.start()
 
         self.pipeline_thread = threading.Thread(target=self._worker_loop, daemon=True)
@@ -105,7 +105,7 @@ class AutoMappingServer:
         print("[swiftmap-server] stopping...")
         self.is_running = False
         if self.transporter:
-            self.transporter.stop_server()
+            self.transporter.stop()
         if self.transport_thread:
             self.transport_thread.join(timeout=2.0)
         if self.pipeline_thread:
@@ -115,12 +115,19 @@ class AutoMappingServer:
     def _worker_loop(self):
         """Block on the next full Map and run the pipeline over it, until stop() unblocks it."""
         while True:
-            map_ = self.transporter.next_map()
-            if map_ is None:
+            map_id = self.transporter.next_map_id()
+            if map_id is None:
                 break
-            result = self.session.process(map_)
+
+            result = self.session.process(map_id)
             if "error" in result:
                 print(f"[swiftmap-server] {result['error']}")
+                continue
+
+            map_ = self.db.get_map(map_id)
+            map_.write2disk()
+            if self.db.grow_site(map_):
+                self.db.get_site().write2disk()
 
     # ============================================================ helper
     def send_to_client(self, payload: bytes):

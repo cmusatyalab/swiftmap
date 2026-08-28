@@ -12,8 +12,9 @@ segmentation are pipeline stages that take a ``Map``.
 
 import os
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+from swiftmap import constants
 from swiftmap.database.map import Map
 from swiftmap.database.site import Site
 
@@ -30,17 +31,39 @@ class Database:
         self.maps_dir = os.path.join(root, MAPS_DIRNAME)
         self.site_dir = os.path.join(root, SITE_DIRNAME)
         os.makedirs(self.maps_dir, exist_ok=True)
-        self.site = Site()
+        self.site = Site(self.site_dir)
+        self.maps: Dict[str, Map] = {}     # map id -> Map, the id everything is passed by
+        self._load_maps()
+
+    def _load_maps(self):
+        """Register the maps already under ``maps/``, so ids survive a restart."""
+        if not os.path.isdir(self.maps_dir):
+            return
+        for tag in sorted(os.listdir(self.maps_dir)):
+            path = os.path.join(self.maps_dir, tag)
+            if not os.path.isdir(path):
+                continue
+            map_ = Map(name=tag, path=path)
+            images = [os.path.basename(p) for p in map_.get_keyframe_paths()]
+            map_.update_keyframes(images, [None] * len(images))
+            self.maps[tag] = map_
 
     def get_maps(self) -> List[Map]:
         """Stored maps, newest first."""
+        return list(self.maps.values())[::-1]
+
+    def get_map(self, map_id: str) -> Optional[Map]:
+        """The stored map with this id, or None if there is no such map."""
+        return self.maps.get(map_id)
 
     def get_site(self) -> Site:
-        """The growing site map (tag ``site``)."""
+        """The growing site map, merged from every stored map."""
         return self.site
 
-    def create_site(self, created: datetime = None) -> Site:
-        """Create the site map under ``site/`` for the first time."""
+    def create_site(self) -> Site:
+        """Start the site over, discarding whatever has been merged so far."""
+        self.site = Site(self.site_dir)
+        return self.site
 
     def create_map(self, created: datetime = None) -> Map:
         """Create an empty map under ``maps/`` for a run to write into."""
@@ -48,10 +71,10 @@ class Database:
         tag = f"map_{created.strftime('%Y%m%d_%H%M%S_%f')}"
         path = os.path.join(self.maps_dir, tag)
         os.makedirs(path, exist_ok=True)
-        return Map(name=tag, path=path)
+        self.maps[tag] = Map(name=tag, path=path)
+        return self.maps[tag]
 
-    def grow_site(self, new_map: Map, conf_thres: float = 50.0, voxel_size: float = 0.1,
-                  created: datetime = None) -> Site:
-        """Grow the site with a stored map."""
-        return self.site.grow(new_map, conf_thres=conf_thres, voxel_size=voxel_size,
-                              created=created)
+    def grow_site(self, new_map: Map,
+                  conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD) -> bool:
+        """Merge a stored map into the site; False if it has nothing to contribute."""
+        return self.site.grow(new_map, conf_threshold)

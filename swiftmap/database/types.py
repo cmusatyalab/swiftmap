@@ -250,81 +250,58 @@ class FlightPlan:
                 f"num_waypoints={len(self.waypoints)})")
 
 
-    def to_kml(self, doc_name: str = "flight_plan") -> Optional[str]:
-        """Single-layer placemark KML string of this plan's waypoints.
+    def to_kml(self, doc_name: str = "next_flight") -> Optional[str]:
+        """One KML holding the planned waypoints and the area they enclose.
 
-        None if there are no waypoints.
+        The polygon's ring is the waypoints themselves, at the same altitude, so the
+        two layers sit on top of each other. None if there are no waypoints.
         """
         if not self.waypoints:
             return None
-        placemarks = [
+
+        pins = "\n".join(
             f"    <Placemark>\n"
             f"      <name>v{i}</name>\n"
             f"      <styleUrl>#icon-1899-0288D1-nodesc</styleUrl>\n"
-            f"      <Point><coordinates>{wp.longitude:.13f},{wp.latitude:.13f},"
-            f"{wp.altitude or 0}</coordinates></Point>\n"
+            f"      <Point><altitudeMode>absolute</altitudeMode>"
+            f"<coordinates>{wp.longitude:.9f},{wp.latitude:.9f},"
+            f"{wp.altitude or 0:.3f}</coordinates></Point>\n"
             f"    </Placemark>"
-            for i, wp in enumerate(self.waypoints)
-        ]
-        kml = (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
-            '  <Document>\n'
-            f'    <name>{doc_name}</name>\n'
-            f'{self._STYLE}\n'
-            f'{chr(10).join(placemarks)}\n'
-            '  </Document>\n'
-            '</kml>\n'
-        )
-        return kml
+            for i, wp in enumerate(self.waypoints))
 
-    def to_polygon_kml(self, doc_name: str = "nfn_area",
-                       layer_name: str = "Untitled layer",
-                       placemark_name: str = "nfn_target_area") -> Optional[str]:
-        """Polygon KML whose ring vertices are the viewpoints' target GPS.
+        return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
+                '  <Document>\n'
+                f'    <name>{doc_name}</name>\n'
+                f'{self._STYLE}\n'
+                f'{self._POLY_STYLE}\n'
+                f'{self._area_placemark()}'
+                f'{pins}\n'
+                '  </Document>\n'
+                '</kml>\n')
 
-        Reads as an area rather than pins. None unless at least 3 targets are
-        GPS-tagged; the ring is ordered around its centroid and closed.
-        """
-        latlons = [(vp.target_gps.latitude, vp.target_gps.longitude)
-                   for vp in self.viewpoints if vp.target_gps is not None]
-        if len(latlons) < 3:
-            return None
-
-        ring = self._order_ring(latlons)
+    def _area_placemark(self) -> str:
+        """The polygon enclosing the waypoints; empty until there are three of them."""
+        if len(self.waypoints) < 3:
+            return ""
+        ring = self._order_ring([(wp.latitude, wp.longitude, wp.altitude or 0.0)
+                                 for wp in self.waypoints])
         ring.append(ring[0])  # close the ring
-        coords = "\n".join(f"                {lon:.7f},{lat:.7f},0" for lat, lon in ring)
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
-            '  <Document>\n'
-            f'    <name>{doc_name}</name>\n'
-            '    <description/>\n'
-            f'{self._POLY_STYLE}\n'
-            '    <Folder>\n'
-            f'      <name>{layer_name}</name>\n'
-            '      <Placemark>\n'
-            f'        <name>{placemark_name}</name>\n'
-            '        <styleUrl>#poly-000000-1200-77-nodesc</styleUrl>\n'
-            '        <Polygon>\n'
-            '          <outerBoundaryIs>\n'
-            '            <LinearRing>\n'
-            '              <tessellate>1</tessellate>\n'
-            '              <coordinates>\n'
-            f'{coords}\n'
-            '              </coordinates>\n'
-            '            </LinearRing>\n'
-            '          </outerBoundaryIs>\n'
-            '        </Polygon>\n'
-            '      </Placemark>\n'
-            '    </Folder>\n'
-            '  </Document>\n'
-            '</kml>\n'
-        )
+        coords = "\n".join(f"          {lon:.9f},{lat:.9f},{alt:.3f}"
+                            for lat, lon, alt in ring)
+        return ('    <Placemark>\n'
+                '      <name>nfn_flight_area</name>\n'
+                '      <styleUrl>#poly-000000-1200-77-nodesc</styleUrl>\n'
+                '      <Polygon><altitudeMode>absolute</altitudeMode>\n'
+                '        <outerBoundaryIs><LinearRing><coordinates>\n'
+                f'{coords}\n'
+                '        </coordinates></LinearRing></outerBoundaryIs>\n'
+                '      </Polygon>\n'
+                '    </Placemark>\n')
 
     @staticmethod
     def _order_ring(latlons: List[tuple]) -> List[tuple]:
-        """Sort (lat, lon) by polar angle about the centroid: a non-self-intersecting ring."""
+        """Sort (lat, lon, alt) by polar angle about the centroid: a simple, closed ring."""
         clat = sum(p[0] for p in latlons) / len(latlons)
         clon = sum(p[1] for p in latlons) / len(latlons)
         return sorted(latlons, key=lambda p: np.arctan2(p[0] - clat, p[1] - clon))

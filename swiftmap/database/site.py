@@ -1,45 +1,132 @@
 # Copyright (C) 2024 Carnegie Mellon University
 
-"""The ``Site``: a database's one growing map."""
+"""The ``Site``: a database's one growing map.
 
-import glob
+Every georeferenced ``Map`` is merged into a common ENU frame about the first map's
+GPS origin, then collapsed onto a voxel grid so overlapping flights reinforce each
+other instead of stacking duplicate points.
+"""
+
+import json
 import os
-from datetime import datetime
+from typing import List, Optional
 
-from swiftmap.database.map import Map
-from swiftmap.database.types import GPS, Georeference
 import numpy as np
-import pymap3d
+import trimesh
+
+from swiftmap import constants
+from swiftmap.database.map import Map
+from swiftmap.database.types import GPS
+
+_VOXEL_SIZE = 0.1       # metres; cells this size collapse to one point
+
+# ENU (east, north, up) -> glTF's Y-up axes, matching the per-map georeferenced scene.
+_ENU_TO_YUP = np.array([[-1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                        [0.0, 1.0, 0.0]])
 
 
+class Site:
+    """Every aligned Map merged into one cloud, in ENU metres about a shared origin."""
 
-class Site():
-    maps: list[Map]
-    overall_map : Map
-    
-    def __init__(self):
-        self.maps = []
-        self.overall_map = None
+    def __init__(self, path: str, voxel_size: float = _VOXEL_SIZE):
+        self.path = path
+        self.voxel_size = voxel_size
+        self.maps: List[Map] = []
+        self.origin: Optional[GPS] = None      # the first grown map's GPS origin
+        self.points: Optional[np.ndarray] = None
+        self.colors: Optional[np.ndarray] = None
+        self.conf: Optional[np.ndarray] = None
+        self.source: Optional[np.ndarray] = None   # index into self.maps, per point
 
-    def grow( self, new_map: Map, merge_params):
+    def __repr__(self):
+        return (f"Site(maps={len(self.maps)}, "
+                f"points={0 if self.points is None else len(self.points)})")
+
+    def grow(self, new_map: Map,
+             conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD) -> bool:
+        """Merge one georeferenced Map in; False if it has nothing to contribute."""
+        pt = new_map.get_pointcloud()
+        georef = new_map.get_georeference()
+        if pt is None or pt.world_points is None or georef is None:
+            return False
+
+        if self.origin is None:
+            self.origin = georef.origin        # the first map fixes the common frame
+        lla0 = (self.origin.latitude, self.origin.longitude, self.origin.altitude or 0.0)
+
+        keep = pt.confidence_mask(conf_threshold)
+        points = georef.to_enu(pt.flatten_points()[keep], lla0)
+        colors = pt.flatten_colors()[keep]
+        conf = pt.flatten_conf()[keep]
+        source = np.full(len(points), len(self.maps), dtype=np.int64)
+
+        if self.points is not None:
+            points = np.vstack([self.points, points])
+            colors = np.vstack([self.colors, colors])
+            conf = np.concatenate([self.conf, conf])
+            source = np.concatenate([self.source, source])
+
+        self.points, self.colors, self.conf, self.source = _voxel_merge(
+            points, colors, conf, source, self.voxel_size)
         self.maps.append(new_map)
-        self.overall_map = _merge(self.maps, merge_params)
+        print(f"[site] grew with {new_map.meta.name}: {len(self.maps)} maps, "
+              f"{len(self.points)} points")
+        return True
+
+    def write2disk(self):
+        """Export the merged cloud twice -- true colour, and coloured by source map."""
+        if self.points is None or not len(self.points):
+            return
+        os.makedirs(self.path, exist_ok=True)
+
+        vertices = self.points @ _ENU_TO_YUP.T
+        scene = trimesh.Scene()
+        scene.add_geometry(trimesh.PointCloud(vertices=vertices, colors=self.colors),
+                           geom_name="site")
+        scene.export(os.path.join(self.path, "site.glb"))
+
+        by_map = trimesh.Scene()
+        by_map.add_geometry(trimesh.PointCloud(vertices=vertices, colors=self.map_colors()),
+                            geom_name="merged")
+        by_map.export(os.path.join(self.path, "merged_res.glb"))
+
+        with open(os.path.join(self.path, "site.geojson"), "w") as f:
+            json.dump(self.to_geojson(), f, indent=2)
+
+    def map_colors(self) -> np.ndarray:
+        """Per-point RGB naming which map each point came from, hues golden-angle apart."""
+        import colorsys
+        palette = np.array([[int(255 * v) for v in colorsys.hsv_to_rgb((i * 0.6180339887) % 1.0,
+                                                                      0.9, 1.0)]
+                            for i in range(len(self.maps))], dtype=np.uint8)
+        return palette[self.source]
+
+    def to_geojson(self) -> dict:
+        """site.geojson: where site.glb's local (0, 0, 0) sits on Earth."""
+        return {"type": "FeatureCollection", "features": [{
+            "type": "Feature",
+            "geometry": {"type": "Point",
+                         "coordinates": [self.origin.longitude, self.origin.latitude,
+                                         self.origin.altitude or 0.0]},
+            "properties": {"layer": "site_origin",
+                           "model": "site.glb",
+                           "description": "model local (0,0,0); the first merged map's origin",
+                           "altitude_mode": "absolute",
+                           "num_maps": len(self.maps),
+                           "num_points": len(self.points)}}]}
 
 
-
-
-
-# ------------------------------------------------------------------- merge
-
-def _voxel_merge(points, colors, conf, voxel_size: float):
+def _voxel_merge(points, colors, conf, source, voxel_size: float):
     """Collapse points sharing a ``voxel_size`` grid cell into one, confidence-weighted.
 
     Position and color become the confidence-weighted mean of the cell; the merged
-    confidence is the cell's max. ``voxel_size <= 0`` returns the input unchanged.
+    confidence is the cell's max, and the cell is credited to the map that contributed
+    its most confident point. ``voxel_size <= 0`` returns the input unchanged.
     """
     points = np.asarray(points, dtype=float)
     if voxel_size <= 0 or len(points) == 0:
-        return points, np.asarray(colors), np.asarray(conf, dtype=float)
+        return points, np.asarray(colors), np.asarray(conf, dtype=float), np.asarray(source)
 
     w = np.asarray(conf, dtype=float)
     vidx = np.floor(points / voxel_size).astype(np.int64)
@@ -61,51 +148,8 @@ def _voxel_merge(points, colors, conf, voxel_size: float):
         col[:, k] = np.bincount(inv, weights=w * cols_f[:, k], minlength=g) / wsafe
     mconf = np.zeros(g)
     np.maximum.at(mconf, inv, w)
-    return pos, np.clip(col, 0, 255).astype(np.uint8), mconf
-
-
-# ---------------------------------------------------------------------- merge helpers
-
-def _enu_frame_rotation(gt: Georeference, origin_lla) -> np.ndarray:
-    """Rotation from a map's own ENU frame into the common ENU frame (tangent tilt)."""
-    probe = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
-    lat, lon, alt = pymap3d.enu2geodetic(probe[:, 0], probe[:, 1], probe[:, 2],
-                                         *gt.lla0)
-    e, n, u = pymap3d.geodetic2enu(lat, lon, alt, *origin_lla)
-    p = np.column_stack([e, n, u])
-    u_, _, vt = np.linalg.svd((p[1:] - p[0]).T)
-    return u_ @ vt
-
-
-def _transform_frames(frames, gt: Georeference, origin_lla):
-    """Camera frames into the common ENU frame about ``origin_lla``."""
-    if not frames:
-        return []
-    r_frame = _enu_frame_rotation(gt, origin_lla) @ gt.R
-    out = []
-    for fr in frames:
-        c2 = gt.to_enu(np.asarray(fr["camera_position_world"], float), origin_lla)[0]
-        r2 = np.asarray(fr["rotation_matrix"], float) @ r_frame.T
-        t2 = -r2 @ c2
-        out.append({**fr, "camera_position_world": c2.tolist(), "rotation_matrix": r2.tolist(),
-                    "translation_vector": t2.tolist(),
-                    "extrinsic_matrix": np.hstack([r2, t2.reshape(3, 1)]).tolist()})
-    return out
-
-
-def _merge(parts, origin=None, voxel_size: float = 0.1):
-    """GPS-co-register ``(points, colors, conf, transform, frames)`` parts into one cloud
-    in the common ENU frame about ``origin`` (default: the first part's), voxel-collapsed."""
-    parts = list(parts)
-    first = parts[0][3]
-    origin = origin or first.lla0
-    pts, cols, conf, frames = [], [], [], []
-    for p, c, cf, gt, frs in parts:
-        pts.append(gt.to_enu(p, origin))
-        cols.append(np.asarray(c))
-        conf.append(np.asarray(cf, dtype=float))
-        frames += _transform_frames(frs, gt, origin)
-    mpts, mcols, mconf = _voxel_merge(np.vstack(pts), np.vstack(cols),
-                                     np.concatenate(conf), voxel_size)
-    identity = Georeference(1.0, np.eye(3), [0.0, 0.0, 0.0], GPS(*origin))
-    return mpts, mcols, mconf, identity, frames
+    # visiting cells in ascending confidence leaves each one holding its best point's map
+    order = np.argsort(w, kind="stable")
+    msrc = np.zeros(g, dtype=np.int64)
+    msrc[inv[order]] = np.asarray(source)[order]
+    return pos, np.clip(col, 0, 255).astype(np.uint8), mconf, msrc
