@@ -78,7 +78,10 @@ class MappingSession:
         return self.planner.run(map_, params)
 
     # --------------------------------------------------------- segmentation
-    def segment(self, map_: Map, query: str,
+    def segment(self, map_id: str, query: str,
                 params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Segment one text query over a reconstructed Map and lift it into 3D."""
+        map_ = self.db.get_map(map_id)
+        if map_ is None:
+            return {"error": f"Unknown map '{map_id}'"}
         return self.segmenter.run(map_, {**(params or {}), "query": query})

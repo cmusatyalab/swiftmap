@@ -7,13 +7,18 @@ pipeline stages attach: a ``PointCloud`` reconstruction, a ``Georeference``, and
 ``FlightPlan``. ``write2disk()`` is the one place any of it touches disk."""
 
 
+import csv
 import json
 import os
+import re
+
+import numpy as np
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
 
-from swiftmap.database.types import GPS, FlightPlan, Georeference, PointCloud
+from swiftmap.database.types import (CameraPose, GPS, FlightPlan, Georeference,
+                                     PointCloud)
 
 
 @dataclass
@@ -83,8 +88,13 @@ class Map:
         return os.path.join(self.pointcloud_dir, "georeferenced")
 
     @property
+    def inference_dir(self) -> str:
+        """What the backbone saw and predicted: the frames, and the per-pixel grid."""
+        return os.path.join(self.pointcloud_dir, "inference")
+
+    @property
     def model_input_dir(self) -> str:
-        return os.path.join(self.pointcloud_dir, "model_input")
+        return os.path.join(self.inference_dir, "model_input")
 
 # ================================================================== input
     def get_input_keyframe_paths(self) -> List[str]:
@@ -130,21 +140,96 @@ class Map:
 
 
 
-# ================================================================== util
+# ================================================================== load
 
     def load(self) -> "Map":
         """Restore what an earlier run left under ``self.path``."""
         images = [os.path.basename(p) for p in self.get_input_keyframe_paths()]
-        gps = None
-        # todo: read the self.get_input_gps_path to get all the gps
         self.keyframe_images = list(images)
-        self.keyframe_gps = list(gps)
+        self.keyframe_gps = self._read_input_gps(len(self.keyframe_images))
         self.meta.num_keyframes = len(self.keyframe_images)
+        self._load_pointcloud()
+        self._load_georeference()
+        self._load_flight_plan()
         return self
     
+    def _read_input_gps(self, num_keyframes: int) -> List[Optional[GPS]]:
+        """The GPS write2disk() stored, one per keyframe in capture order."""
+        path = self.get_input_gps_path()
+        if not os.path.isfile(path):
+            return [None] * num_keyframes
+
+        rows: List[Optional[GPS]] = []
+        with open(path, newline="") as f:
+            reader = csv.reader(f)
+            next(reader, None)                                  # header
+            for row in reader:
+                if len(row) < 2 or not row[0] or not row[1]:
+                    rows.append(None)                           # keyframe with no fix
+                    continue
+                alt = row[2] if len(row) > 2 else ""
+                rows.append(GPS(float(row[0]), float(row[1]),
+                                float(alt) if alt else None))
+
+        if len(rows) != num_keyframes:
+            print(f"{path}: {len(rows)} gps rows for {num_keyframes} keyframes, ignoring")
+            return [None] * num_keyframes
+        return rows
+    
+    def _load_flight_plan(self):
+        """Rebuild the plan from nextflightplan/next_flight.kml"""
+        path = os.path.join(self.flightplan_dir, "next_flight.kml")
+        if not os.path.isfile(path):
+            return
+        with open(path) as f:
+            fixes = re.findall(
+                r"<Point>.*?<coordinates>([-\d.]+),([-\d.]+),([-\d.]+)</coordinates>", f.read())
+        if fixes:
+            self.update_flight_plan(FlightPlan(waypoints=[
+                GPS(float(lat), float(lon), float(alt)) for lon, lat, alt in fixes]))
+
+    def _load_pointcloud(self):
+        """Rebuild the reconstruction from inference/prediction.npz"""
+        path = os.path.join(self.inference_dir, "prediction.npz")
+        if not os.path.isfile(path):
+            return
+        data = np.load(path)
+        held = {name: data[name] for name in data.files}
+        extrinsic = held.get("extrinsic")
+        self.reconstructed_results = PointCloud(
+            **held,
+            cameras=[] if extrinsic is None else
+            [CameraPose.from_extrinsic(e) for e in extrinsic])
+
+    def _load_georeference(self):
+        """Rebuild the transform from georeference/transform.json"""
+        path = os.path.join(self.georeference_dir, "transform.json")
+        if not os.path.isfile(path):
+            return
+        with open(path) as f:
+            cfg = json.load(f)
+        origin = cfg["origin"]
+        self.update_georeference(Georeference(
+            cfg["scale"], cfg["rotation"], cfg["translation"],
+            GPS(origin["latitude"], origin["longitude"], origin["altitude"])))
+
+
+# ================================================================== save
     def write2disk(self):
         """Export everything the pipeline stages attached, under ``self.path``."""
         os.makedirs(self.path, exist_ok=True)
+
+        if self.keyframe_gps:
+            os.makedirs(self.gps_dir, exist_ok=True)
+            with open(self.get_input_gps_path(), "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["latitude", "longitude", "altitude"])
+                for gps in self.keyframe_gps:
+                    if gps is None:
+                        writer.writerow(["", "", ""])
+                    else:
+                        writer.writerow([gps.latitude, gps.longitude,
+                                         "" if gps.altitude is None else gps.altitude])
 
         pt = self.reconstructed_results
         if pt is not None:
@@ -162,6 +247,16 @@ class Map:
                 for name, data in pt.model_input:
                     with open(self._artifact(self.model_input_dir, name), "wb") as f:
                         f.write(data)
+
+            prediction = {name: array for name, array in (
+                ("world_points", pt.world_points),
+                ("world_points_conf", pt.world_points_conf),
+                ("images", pt.images),
+                ("extrinsic", pt.extrinsic),
+                ("intrinsic", pt.intrinsic)) if array is not None}
+            if prediction:
+                np.savez_compressed(self._artifact(self.inference_dir, "prediction.npz"),
+                                    **prediction)
 
             if pt.geo_scene is not None:
                 pt.geo_scene.export(self._artifact(self.georeferenced_dir, "scene_geo.glb"))

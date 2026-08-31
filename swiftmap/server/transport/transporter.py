@@ -19,7 +19,7 @@ import queue
 import cv2
 import numpy as np
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from swiftmap import constants
 from swiftmap.server.transport import protocol
@@ -65,7 +65,7 @@ class Transporter:
         }
 
         # The open batch, and closed batches waiting for a worker.
-        self._batch: List[(str, GPS)] = []
+        self._batch: List[Tuple[str, GPS]] = []
         self._batch_lock = threading.Lock()
         self._batches: "queue.Queue" = queue.Queue()
 
@@ -291,18 +291,19 @@ class Transporter:
             print(f"Error saving keyframe: {e}")
             return ""
         
-    def _save_gps(self, metadata) -> GPS:
+    def _save_gps(self, metadata) -> Optional[GPS]:
         """Append one keyframe's GPS to the scratch dir's gps.csv, as the frame is saved."""
         gps = metadata.get("gps")
         with open(self.temp_gps_path, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["", "", ""] if gps is None else list(gps))
-        return GPS(gps)
+        return GPS(*gps) if gps is not None else None
 
     def _add_to_batch(self, img_path: str, gps: GPS):
         """Append to the open batch; once full, close it into a Map and queue its id."""
         with self._batch_lock:
-            self._batch.append(img_path, gps)
+            pack = (img_path, gps)
+            self._batch.append(pack)
             if len(self._batch) < self.batch_size:
                 return
             batch= self._batch
@@ -311,11 +312,11 @@ class Transporter:
         map_id = self._close_batch(batch).meta.name
         self._batches.put(map_id)
 
-    def _close_batch(self, batch: List[(str, GPS)]) -> Map:
+    def _close_batch(self, batch: List[Tuple[str, GPS]]) -> Map:
         map_ = self.db.create_map()
         images, all_gps = [], []
-        idx = 0
-        for img_path, gps in enumerate(batch):
+        
+        for idx, (img_path, gps) in enumerate(batch):
             name = f"frame_{idx:06d}.jpg"
             try:
                 os.replace(img_path, os.path.join(map_.images_dir, name))
@@ -324,7 +325,6 @@ class Transporter:
                 continue
             images.append(name)
             all_gps.append(gps)
-            idx += 1
         map_.update_input(images, all_gps)
         return map_
 

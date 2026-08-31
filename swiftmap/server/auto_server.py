@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from swiftmap import constants
 from swiftmap.server.transport import protocol
@@ -126,8 +126,34 @@ class AutoMappingServer:
 
             map_ = self.db.get_map(map_id)
             map_.write2disk()
-            if self.db.grow_site(map_):
+            if self.db.grow_site(map_id):
                 self.db.get_site().write2disk()
+
+    # ============================================================ viewer API
+    def list_map_ids(self) -> List[str]:
+        """Stored map ids, newest first."""
+        return [m.meta.name for m in self.db.get_maps()]
+
+    def map_scenes(self, map_id: str) -> Dict[str, Optional[str]]:
+        """The local scene and confidence GLBs of one map, as paths a viewer can load."""
+        map_ = self.db.get_map(map_id)
+        if map_ is None:
+            return {}
+        return {name: self._existing(map_.local_dir, filename) for name, filename in
+                (("scene", "scene.glb"), ("confidence", "scene_confidence.glb"))}
+
+    def site_scenes(self) -> Dict[str, Optional[str]]:
+        """The site's GLBs, as paths a viewer can load."""
+        site = self.db.get_site()
+        return {name: self._existing(site.path, filename) for name, filename in
+                (("scene", "site.glb"), ("confidence", "site_confidence.glb"),
+                 ("merged", "merged_res.glb"))}
+
+    @staticmethod
+    def _existing(directory: str, filename: str) -> Optional[str]:
+        """The path if it is on disk, else None -- a viewer shows nothing for None."""
+        path = os.path.join(directory, filename)
+        return path if os.path.isfile(path) else None
 
     # ============================================================ helper
     def send_to_client(self, payload: bytes):

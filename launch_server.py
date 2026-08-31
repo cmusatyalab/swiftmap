@@ -17,6 +17,7 @@ Config is read from env vars (below), overridable by CLI flags:
     SWIFTMAP_BATCH_SIZE      keyframes per batch       (default 70)
     SWIFTMAP_MIN_DISPARITY   keyframe-selection px     (default 40)
     SWIFTMAP_OUTPUT_DIR      export dir (mount this)   (default output)
+    SWIFTMAP_VIEWER_PORT     results viewer            (default 7866)
 
 Usage:
     python launch_server.py
@@ -34,6 +35,7 @@ if repo_root not in sys.path:
 from swiftmap import constants
 from swiftmap.server.transport import protocol
 from swiftmap.server import AutoMappingServer, ServerConfig
+from swiftmap.server.viewer import launch_viewer
 
 
 def _env(name: str, default):
@@ -55,6 +57,9 @@ def main() -> int:
     p.add_argument("--min-disparity", type=float,
                    default=float(_env("SWIFTMAP_MIN_DISPARITY", constants.DEFAULT_MIN_DISPARITY)))
     p.add_argument("--output-dir", default=_env("SWIFTMAP_OUTPUT_DIR", "output"))
+    p.add_argument("--viewer-port", type=int,
+                   default=int(_env("SWIFTMAP_VIEWER_PORT", constants.GUI_PORT)))
+    p.add_argument("--no-viewer", action="store_true", help="run headless, without the viewer")
     args = p.parse_args()
 
     cfg = ServerConfig(
@@ -63,7 +68,15 @@ def main() -> int:
         batch_size=args.batch_size, min_disparity=args.min_disparity,
         output_dir=args.output_dir,
     )
-    AutoMappingServer(cfg).run()
+    server = AutoMappingServer(cfg)
+    if not args.no_viewer:
+        # The viewer is a convenience; a failure here must not stop the mapping run.
+        try:
+            launch_viewer(server, host=args.host, port=args.viewer_port)
+            print(f"[swiftmap-server] viewer on http://localhost:{args.viewer_port}")
+        except Exception as e:
+            print(f"[swiftmap-server] viewer unavailable: {e}")
+    server.run()
     return 0
 
 

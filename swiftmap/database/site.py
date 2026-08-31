@@ -9,6 +9,7 @@ other instead of stacking duplicate points.
 
 import json
 import os
+import shutil
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -19,6 +20,9 @@ from swiftmap.database.map import Map
 from swiftmap.database.types import GPS
 
 _VOXEL_SIZE = 0.1       # metres; cells this size collapse to one point
+# Confidence colours span a fixed range, not each write's own min/max, so the ramp means
+# the same thing every iteration and the site can be compared with itself as it grows.
+_CONF_RANGE = (0.0, 25.0)
 
 # ENU (east, north, up) -> glTF's Y-up axes, matching the per-map georeferenced scene.
 _ENU_TO_YUP = np.array([[-1.0, 0.0, 0.0],
@@ -74,9 +78,25 @@ class Site:
               f"{len(self.points)} points")
         return True
 
+    def drop(self, dropped: Map) -> bool:
+        """Remove one map's contribution and re-index the rest"""
+        if dropped not in self.maps:
+            return False
+
+        index = self.maps.index(dropped)
+        keep = self.source != index
+        self.points, self.colors = self.points[keep], self.colors[keep]
+        self.conf, self.source = self.conf[keep], self.source[keep]
+        self.source[self.source > index] -= 1      # close the gap the removal leaves
+        self.maps.pop(index)
+        print(f"[site] dropped {dropped.meta.name}: {len(self.maps)} maps, "
+              f"{len(self.points)} points")
+        return True
+
     def write2disk(self):
         """Export the merged cloud twice -- true colour, and coloured by source map."""
         if self.points is None or not len(self.points):
+            shutil.rmtree(self.path, ignore_errors=True)   # nothing left; drop stale files
             return
         os.makedirs(self.path, exist_ok=True)
 
@@ -91,6 +111,11 @@ class Site:
                             geom_name="merged")
         by_map.export(os.path.join(self.path, "merged_res.glb"))
 
+        by_conf = trimesh.Scene()
+        by_conf.add_geometry(trimesh.PointCloud(vertices=vertices, colors=self.conf_colors()),
+                             geom_name="confidence")
+        by_conf.export(os.path.join(self.path, "site_confidence.glb"))
+
         with open(os.path.join(self.path, "site.geojson"), "w") as f:
             json.dump(self.to_geojson(), f, indent=2)
 
@@ -98,16 +123,32 @@ class Site:
         np.savez_compressed(os.path.join(self.path, "site_points.npz"),
                             conf=self.conf.astype(np.float32), source=self.source)
 
+    def conf_colors(self) -> np.ndarray:
+        """Per-point RGBA over a fixed confidence range: red (low) to green (high)."""
+        lo, hi = _CONF_RANGE
+        norm = np.clip((self.conf - lo) / (hi - lo), 0.0, 1.0)
+        colors = np.zeros((len(norm), 4), dtype=np.uint8)
+        colors[:, 0] = ((1.0 - norm) * 255).astype(np.uint8)
+        colors[:, 1] = (norm * 255).astype(np.uint8)
+        colors[:, 3] = 255
+        return colors
+
     def map_colors(self) -> np.ndarray:
         """Per-point RGB naming which map each point came from."""
         return self._palette()[self.source]
 
     def _palette(self) -> np.ndarray:
         """One RGB per merged map, hues golden-angle apart so any count stays distinct."""
+        return np.array([self._palette_at(i) for i in range(max(len(self.maps), 1))],
+                        dtype=np.uint8)
+
+    @staticmethod
+    def _palette_at(index: int) -> np.ndarray:
+        """The index-th distinct hue, spaced by the golden angle."""
         import colorsys
-        return np.array([[int(255 * v) for v in colorsys.hsv_to_rgb((i * 0.6180339887) % 1.0,
-                                                                    0.9, 1.0)]
-                         for i in range(max(len(self.maps), 1))], dtype=np.uint8)
+        return np.array([int(255 * v) for v in
+                         colorsys.hsv_to_rgb((index * 0.6180339887) % 1.0, 0.9, 1.0)],
+                        dtype=np.uint8)
 
     def load(self, maps: Dict[str, Map]) -> bool:
         """Restore a site an earlier run wrote; False if there is nothing on disk."""
@@ -146,6 +187,8 @@ class Site:
                            "altitude_mode": "absolute",
                            "num_maps": len(self.maps),
                            "num_points": len(self.points),
+                           "mean_confidence": float(self.conf.mean()),
+                           "median_confidence": float(np.median(self.conf)),
                            "map_ids": [m.meta.name for m in self.maps]}}]}
 
 
