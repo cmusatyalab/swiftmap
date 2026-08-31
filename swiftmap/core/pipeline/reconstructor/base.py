@@ -67,7 +67,7 @@ class BaseReconstructor(ABC):
     # ---------------------------------------------------------- orchestration
     def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Run the full backbone -> 3D content -> confidence pipeline."""
-        keyframe_paths = map.get_keyframe_paths()
+        keyframe_paths = map.get_input_keyframe_paths()
 
         if not self.is_initialized:
             if not self.initialize_model():
@@ -100,7 +100,7 @@ class BaseReconstructor(ABC):
             postprocess_time = time.time() - postprocess_start
 
             # add the point cloud to the map
-            map.update_reconstruction(reconstruction)
+            map.update_pointcloud(reconstruction)
 
             generation_start = time.time()
 

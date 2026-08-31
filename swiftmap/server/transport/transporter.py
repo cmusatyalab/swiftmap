@@ -11,6 +11,7 @@ reconstruction worker. The wire format lives in ``swiftmap.server.transport.prot
 
 import os
 import socket
+import csv
 import struct
 import threading
 import time
@@ -23,6 +24,7 @@ from typing import Optional, Dict, Any, List
 from swiftmap import constants
 from swiftmap.server.transport import protocol
 from swiftmap.server.transport.keyframe_selector import KeyframeSelector
+from swiftmap.database.database import Database
 from swiftmap.database.map import Map
 from swiftmap.database.types import GPS
 
@@ -34,20 +36,12 @@ class Transporter:
                  min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
                  host: str = "0.0.0.0", port: int = protocol.TCP_PORT,
                  temp_dir: Optional[str] = None):
-        """
-        Args:
-            batch_size: keyframes per batch; a batch is queued the moment it fills.
-            db: ``Database`` used to create the ``Map`` a closed batch becomes.
-            min_disparity: keyframe-selection threshold; 0 keeps every frame.
-            host, port: where to listen.
-            temp_dir: directory for keyframe JPEGs. If given (session-owned), it is
-                      not deleted on stop. If None, the server creates and owns one.
-        """
+        
         self.host = host
         self.port = port
         self.keyframe_selector = KeyframeSelector(min_disparity=min_disparity)
         self.batch_size = batch_size
-        self.db = db
+        self.db: Database  = db
 
         # Server state
         self.server_socket = None
@@ -71,12 +65,14 @@ class Transporter:
         }
 
         # The open batch, and closed batches waiting for a worker.
-        self._batch: List[Dict[str, Any]] = []
+        self._batch: List[(str, GPS)] = []
         self._batch_lock = threading.Lock()
         self._batches: "queue.Queue" = queue.Queue()
 
         self.temp_dir = temp_dir
         os.makedirs(self.temp_dir, exist_ok=True)
+        self.temp_gps_path = os.path.join(self.temp_dir, "gps.csv")
+        
 
     # ===================================================================== lifecycle
     def start(self):
@@ -171,13 +167,7 @@ class Transporter:
             print(f"Mapping client {client_address} disconnected")
 
     def receive_image_from_client(self, client_socket) -> Optional[tuple]:
-        """
-        Receive image data from client socket.
-        Compatible with the bundled test client protocol.
-
-        Returns:
-            tuple: (image_array, image_metadata) or None if failed
-        """
+        """Receive image data from client socket."""
         try:
             # Receive the image-size header, then the JPEG body.
             size_data = protocol.recv_exact(client_socket, protocol.SIZE_NBYTES)
@@ -222,12 +212,7 @@ class Transporter:
             return None
 
     def send_status_response(self, client_socket, status_code: str, message: str = "") -> bool:
-        """
-        Send status response back to client.
-
-        Args:
-            status_code: 'success', 'keyframe_selected', 'frame_skipped', or 'error'
-        """
+        """Send status response back to client."""
         try:
             # 3 float64 status header plus any one-shot payload (e.g. the NFN area KML).
             kf, total = self.total_keyframes_selected, self.total_frames_received
@@ -279,9 +264,9 @@ class Transporter:
 
             self.total_keyframes_selected += 1
             self.stats["selected_keyframes"] = self.total_keyframes_selected
-            path = self.save_keyframe(image, metadata)
-            if path:
-                self._add_to_batch(path, metadata.get("gps"))
+            img_path = self._save_keyframe(image, metadata)
+            gps = self._save_gps(metadata)
+            self._add_to_batch(img_path, gps)
 
             print(f"Keyframe selected: {self.total_keyframes_selected}/{self.total_frames_received}")
             return True
@@ -290,47 +275,59 @@ class Transporter:
             print(f"Error processing image: {e}")
             return False
 
-    def save_keyframe(self, image: np.ndarray, metadata: Dict[str, Any]) -> str:
+    def _save_keyframe(self, image: np.ndarray, metadata: Dict[str, Any]) -> str:
         """Save a keyframe to the scratch dir; returns its path, or "" on failure."""
         try:
             timestamp_str = metadata["timestamp"].strftime("%Y%m%d_%H%M%S_%f")
             frame_id = metadata["frame_id"]
-            filename = f"keyframe_{frame_id:06d}_{timestamp_str}.jpg"
-            filepath = os.path.join(self.temp_dir, filename)
+            image_name = f"keyframe_{frame_id:06d}_{timestamp_str}.jpg"
+            image_path = os.path.join(self.temp_dir, image_name)
 
-            cv2.imwrite(filepath, image)
-            print(f"Keyframe saved: {filepath}")
-            return filepath
+            cv2.imwrite(image_path, image)
+            print(f"Keyframe saved: {image_path}")
+            return image_path
 
         except Exception as e:
             print(f"Error saving keyframe: {e}")
             return ""
+        
+    def _save_gps(self, metadata) -> GPS:
+        """Append one keyframe's GPS to the scratch dir's gps.csv, as the frame is saved."""
+        gps = metadata.get("gps")
+        with open(self.temp_gps_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["", "", ""] if gps is None else list(gps))
+        return GPS(gps)
 
-    def _add_to_batch(self, path: str, gps):
+    def _add_to_batch(self, img_path: str, gps: GPS):
         """Append to the open batch; once full, close it into a Map and queue its id."""
         with self._batch_lock:
-            self._batch.append({"path": path, "gps": gps})
+            self._batch.append(img_path, gps)
             if len(self._batch) < self.batch_size:
                 return
-            batch, self._batch = self._batch, []
-        self._batches.put(self._close_batch(batch).meta.name)
+            batch= self._batch
+            self._batch = []
 
-    def _close_batch(self, batch: List[Dict[str, Any]]) -> Map:
-        """Create the batch's Map, move its keyframes into images/, record paired GPS."""
+        map_id = self._close_batch(batch).meta.name
+        self._batches.put(map_id)
+
+    def _close_batch(self, batch: List[(str, GPS)]) -> Map:
         map_ = self.db.create_map()
-        images, gps = [], []
-        for i, e in enumerate(batch):
-            name = f"frame_{i:06d}.jpg"
+        images, all_gps = [], []
+        idx = 0
+        for img_path, gps in enumerate(batch):
+            name = f"frame_{idx:06d}.jpg"
             try:
-                os.replace(e["path"], os.path.join(map_.images_dir, name))
+                os.replace(img_path, os.path.join(map_.images_dir, name))
             except OSError as err:
-                print(f"Error moving keyframe {e['path']} -> {name}: {err}")
+                print(f"Error moving keyframe {img_path} -> {name}: {err}")
                 continue
             images.append(name)
-            g = e.get("gps")
-            gps.append(GPS(g[0], g[1], g[2]) if g else None)
-        map_.update_keyframes(images, gps)
+            all_gps.append(gps)
+            idx += 1
+        map_.update_input(images, all_gps)
         return map_
+
 
     def next_map_id(self) -> Optional[str]:
         """Block until a Map is ready; its id. None once ``stop`` unblocks it."""
@@ -362,16 +359,3 @@ class Transporter:
             print(f"Server runtime: {runtime}")
 
         print("="*50)
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    server = Transporter(batch_size=5, db=None)
-
-    try:
-        if server.initialize():
-            print("Test server starting. Use test/test_client.py to test.")
-            server.start()
-    except KeyboardInterrupt:
-        print("\nShutting down test server...")
-        server.stop()

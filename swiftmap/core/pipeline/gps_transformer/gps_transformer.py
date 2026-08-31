@@ -43,7 +43,7 @@ class GpsTransformer:
             return {"error": "No reconstruction with camera poses yet"}
 
         cams = pt.camera_centers()
-        pairs = [(c, g) for c, g in zip(cams, map.get_keyframe_gps()) if g is not None]
+        pairs = [(c, g) for c, g in zip(cams, map.get_input_gps()) if g is not None]
         if len(pairs) < 3:
             return {"error": f"Only {len(pairs)} keyframes carry GPS; need at least 3"}
 

@@ -11,6 +11,7 @@ segmentation are pipeline stages that take a ``Map``.
 """
 
 import os
+import shutil
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -35,26 +36,8 @@ class Database:
         self.maps: Dict[str, Map] = {}     # map id -> Map, the id everything is passed by
         self._load_maps()
 
-    def _load_maps(self):
-        """Register the maps already under ``maps/``, so ids survive a restart."""
-        if not os.path.isdir(self.maps_dir):
-            return
-        for tag in sorted(os.listdir(self.maps_dir)):
-            path = os.path.join(self.maps_dir, tag)
-            if not os.path.isdir(path):
-                continue
-            map_ = Map(name=tag, path=path)
-            images = [os.path.basename(p) for p in map_.get_keyframe_paths()]
-            map_.update_keyframes(images, [None] * len(images))
-            self.maps[tag] = map_
-
-    def get_maps(self) -> List[Map]:
-        """Stored maps, newest first."""
-        return list(self.maps.values())[::-1]
-
-    def get_map(self, map_id: str) -> Optional[Map]:
-        """The stored map with this id, or None if there is no such map."""
-        return self.maps.get(map_id)
+    def _load_site(self):
+        pass
 
     def get_site(self) -> Site:
         """The growing site map, merged from every stored map."""
@@ -65,6 +48,44 @@ class Database:
         self.site = Site(self.site_dir)
         return self.site
 
+    def grow_site(self, new_map: Map,
+                  conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD) -> bool:
+        """Merge a stored map into the site; False if it has nothing to contribute."""
+        return self.site.grow(new_map, conf_threshold)
+    
+    def del_site(self):
+        """Delete the site from disk and start it over."""
+        shutil.rmtree(self.site_dir, ignore_errors=True)
+        return 
+
+    def _load_maps(self):
+        """Register the maps already under ``maps/``, so ids survive a restart."""
+        if not os.path.isdir(self.maps_dir):
+            return
+        for tag in sorted(os.listdir(self.maps_dir)):
+            path = os.path.join(self.maps_dir, tag)
+            if os.path.isdir(path):
+                self.maps[tag] = Map(name=tag, path=path).load()
+
+    def get_maps(self) -> List[Map]:
+        """Stored maps, newest first."""
+        return list(self.maps.values())[::-1]
+
+    def get_map(self, map_id: str) -> Optional[Map]:
+        """The stored map with this id, or None if there is no such map."""
+        return self.maps.get(map_id)
+    
+    def del_map(self, map_id: str) -> bool:
+        """Delete a stored map from the registry and from disk; False if there is no such map.
+
+        The site is not rebuilt: whatever this map already contributed stays merged in.
+        """
+        map_ = self.maps.pop(map_id, None)
+        if map_ is None:
+            return False
+        shutil.rmtree(map_.path, ignore_errors=True)
+        return True
+
     def create_map(self, created: datetime = None) -> Map:
         """Create an empty map under ``maps/`` for a run to write into."""
         created = created or datetime.now()
@@ -74,7 +95,3 @@ class Database:
         self.maps[tag] = Map(name=tag, path=path)
         return self.maps[tag]
 
-    def grow_site(self, new_map: Map,
-                  conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD) -> bool:
-        """Merge a stored map into the site; False if it has nothing to contribute."""
-        return self.site.grow(new_map, conf_threshold)

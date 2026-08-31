@@ -9,7 +9,7 @@ other instead of stacking duplicate points.
 
 import json
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import trimesh
@@ -94,13 +94,44 @@ class Site:
         with open(os.path.join(self.path, "site.geojson"), "w") as f:
             json.dump(self.to_geojson(), f, indent=2)
 
+        # the GLBs carry only position and colour; keep what a future merge needs
+        np.savez_compressed(os.path.join(self.path, "site_points.npz"),
+                            conf=self.conf.astype(np.float32), source=self.source)
+
     def map_colors(self) -> np.ndarray:
-        """Per-point RGB naming which map each point came from, hues golden-angle apart."""
+        """Per-point RGB naming which map each point came from."""
+        return self._palette()[self.source]
+
+    def _palette(self) -> np.ndarray:
+        """One RGB per merged map, hues golden-angle apart so any count stays distinct."""
         import colorsys
-        palette = np.array([[int(255 * v) for v in colorsys.hsv_to_rgb((i * 0.6180339887) % 1.0,
-                                                                      0.9, 1.0)]
-                            for i in range(len(self.maps))], dtype=np.uint8)
-        return palette[self.source]
+        return np.array([[int(255 * v) for v in colorsys.hsv_to_rgb((i * 0.6180339887) % 1.0,
+                                                                    0.9, 1.0)]
+                         for i in range(max(len(self.maps), 1))], dtype=np.uint8)
+
+    def load(self, maps: Dict[str, Map]) -> bool:
+        """Restore a site an earlier run wrote; False if there is nothing on disk."""
+        meta = os.path.join(self.path, "site.geojson")
+        cloud = os.path.join(self.path, "site.glb")
+        if not all(os.path.isfile(f) for f in
+                   (meta, cloud, os.path.join(self.path, "site_points.npz"))):
+            return False
+
+        with open(meta) as f:
+            feature = json.load(f)["features"][0]
+        lon, lat, alt = feature["geometry"]["coordinates"]
+        self.origin = GPS(lat, lon, alt)
+        self.maps = [maps[i] for i in feature["properties"].get("map_ids", []) if i in maps]
+
+        geometry = list(trimesh.load(cloud).geometry.values())[0]
+        self.points = np.asarray(geometry.vertices) @ np.linalg.inv(_ENU_TO_YUP).T
+        self.colors = np.asarray(geometry.colors)[:, :3]
+
+        arrays = np.load(os.path.join(self.path, "site_points.npz"))
+        self.conf = arrays["conf"].astype(float)
+        self.source = arrays["source"]
+        print(f"[site] loaded {len(self.points)} points from {len(self.maps)} maps")
+        return True
 
     def to_geojson(self) -> dict:
         """site.geojson: where site.glb's local (0, 0, 0) sits on Earth."""
@@ -114,7 +145,8 @@ class Site:
                            "description": "model local (0,0,0); the first merged map's origin",
                            "altitude_mode": "absolute",
                            "num_maps": len(self.maps),
-                           "num_points": len(self.points)}}]}
+                           "num_points": len(self.points),
+                           "map_ids": [m.meta.name for m in self.maps]}}]}
 
 
 def _voxel_merge(points, colors, conf, source, voxel_size: float):
