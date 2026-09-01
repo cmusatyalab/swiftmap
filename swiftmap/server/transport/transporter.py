@@ -333,6 +333,41 @@ class Transporter:
         """Block until a Map is ready; its id. None once ``stop`` unblocks it."""
         return self._batches.get()
 
+    # ==================================================================== open batch
+    def batch_status(self) -> Dict[str, Any]:
+        """How full the open batch is, and the newest keyframe in it."""
+        with self._batch_lock:
+            return {"collected": len(self._batch), "capacity": self.batch_size,
+                    "latest": self._batch[-1][0] if self._batch else None}
+
+    def clear_batch(self) -> int:
+        """Throw away the frames collected so far; returns how many were dropped."""
+        with self._batch_lock:
+            batch, self._batch = self._batch, []
+        for img_path, _ in batch:
+            try:
+                os.remove(img_path)
+            except OSError:
+                pass
+        try:
+            os.remove(self.temp_gps_path)     # the next batch starts its own csv
+        except OSError:
+            pass
+        print(f"[transport] cleared {len(batch)} collected frame(s)")
+        return len(batch)
+
+    def flush_batch(self) -> Optional[str]:
+        """Close the open batch early and queue it, however few frames it holds."""
+        with self._batch_lock:
+            if not self._batch:
+                return None
+            batch, self._batch = self._batch, []
+
+        map_id = self._close_batch(batch).meta.name
+        self._batches.put(map_id)
+        print(f"[transport] flushed {len(batch)} frame(s) as {map_id}")
+        return map_id
+
     # ========================================================================= stats
     def get_keyframe_count(self) -> int:
         """Total keyframes selected so far."""

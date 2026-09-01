@@ -12,19 +12,41 @@ thread that serves it, and the worker thread that feeds each closed Map through 
 Site growth and segmentation are not wired up yet.
 """
 
+import io
 import os
+import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from swiftmap import constants
 from swiftmap.server.transport import protocol
 from swiftmap.server.transport.transporter import Transporter
 from swiftmap.core.session import MappingSession
 from swiftmap.database import Database
+
+
+class _LogTail(io.TextIOBase):
+    """Mirrors stdout into a bounded buffer, so the viewer can show recent progress."""
+
+    def __init__(self, stream, lines: Deque[str]):
+        self.stream, self.lines, self._partial = stream, lines, ""
+
+    def write(self, text: str) -> int:
+        self.stream.write(text)
+        self._partial += text
+        while "\n" in self._partial:
+            line, self._partial = self._partial.split("\n", 1)
+            if line.strip():
+                self.lines.append(line.rstrip())
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
 
 
 @dataclass
@@ -55,6 +77,9 @@ class AutoMappingServer:
 
         # run state
         self.is_running = False
+        self.processing = False        # the worker is mid-pipeline on a batch
+        self.log: Deque[str] = deque(maxlen=200)
+        sys.stdout = _LogTail(sys.stdout, self.log)
         self.transport_thread = None
         self.pipeline_thread = None
         self.start_time = None
@@ -119,15 +144,18 @@ class AutoMappingServer:
             if map_id is None:
                 break
 
-            result = self.session.process(map_id)
-            if "error" in result:
-                print(f"[swiftmap-server] {result['error']}")
-                continue
+            self.processing = True
+            try:
+                result = self.session.process(map_id)
+                if "error" in result:
+                    print(f"[swiftmap-server] {result['error']}")
+                    continue
 
-            map_ = self.db.get_map(map_id)
-            map_.write2disk()
-            if self.db.grow_site(map_id):
-                self.db.get_site().write2disk()
+                self.db.get_map(map_id).write2disk()
+                if self.db.grow_site(map_id):
+                    self.db.get_site().write2disk()
+            finally:
+                self.processing = False
 
     # ============================================================ viewer API
     def list_map_ids(self) -> List[str]:
@@ -148,6 +176,40 @@ class AutoMappingServer:
         return {name: self._existing(site.path, filename) for name, filename in
                 (("scene", "site.glb"), ("confidence", "site_confidence.glb"),
                  ("merged", "merged_res.glb"))}
+
+    def batch_status(self) -> Dict[str, Any]:
+        """How full the open batch is, plus whether the worker is busy with one."""
+        status = (self.transporter.batch_status() if self.transporter else
+                  {"collected": 0, "capacity": self.cfg.batch_size, "latest": None})
+        status["processing"] = self.processing
+        status["log"] = self.recent_log()
+        return status
+
+    def recent_log(self, lines: int = 10) -> List[str]:
+        """The last few lines the pipeline printed, newest last."""
+        return list(self.log)[-lines:]
+
+    def clear_batch(self) -> Dict[str, Any]:
+        """Throw away the frames collected so far."""
+        if self.transporter is None:
+            return {"error": "The transport is not running."}
+        return {"success": True, "cleared": self.transporter.clear_batch()}
+
+    def render_now(self) -> Dict[str, Any]:
+        """Map whatever is in the open batch, without waiting for it to fill."""
+        if self.transporter is None:
+            return {"error": "The transport is not running."}
+        map_id = self.transporter.flush_batch()
+        if map_id is None:
+            return {"error": "No frames collected yet."}
+        return {"success": True, "map_id": map_id}
+
+    def del_map(self, map_id: str) -> Dict[str, Any]:
+        """Delete a stored map, and drop what it contributed to the site."""
+        if not self.db.del_map(map_id):
+            return {"error": f"Unknown map '{map_id}'."}
+        self.db.get_site().write2disk()     # the site no longer includes it
+        return {"success": True, "map_id": map_id}
 
     @staticmethod
     def _existing(directory: str, filename: str) -> Optional[str]:
