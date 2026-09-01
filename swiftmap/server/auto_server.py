@@ -73,7 +73,7 @@ class AutoMappingServer:
 
         # transport
         self.transporter: Optional[Transporter] = None
-        self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_session_")  # scratch dir for keyframe JPEGs
+        self.temp_dir = tempfile.mkdtemp(prefix="swiftmap_session_", dir=self.db.root)
 
         # run state
         self.is_running = False
@@ -154,6 +154,10 @@ class AutoMappingServer:
                 self.db.get_map(map_id).write2disk()
                 if self.db.grow_site(map_id):
                     self.db.get_site().write2disk()
+
+                plan_kml = self.db.get_map(map_id).get_flight_plan().to_kml()
+                if plan_kml:
+                    self.send_to_client(plan_kml.encode())
             finally:
                 self.processing = False
 
