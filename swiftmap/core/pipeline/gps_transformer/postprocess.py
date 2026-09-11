@@ -6,7 +6,7 @@ The reconstruction's own coordinates are unitless and aligned to the first camer
 a viewer that places models on the Earth draws them at the wrong size and heading. This
 rebuilds the surface in ENU metres about the georeference origin, rotated into glTF's
 Y-up convention. glTF carries no coordinate system, so the origin ships alongside it as
-GeoJSON (see ``Georeference.to_geojson``) for whoever has to place the model.
+GeoJSON (see ``Map.to_geojson``) for whoever has to place the model.
 """
 
 from typing import Any, Dict, Optional

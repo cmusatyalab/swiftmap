@@ -78,6 +78,7 @@ class AutoMappingServer:
         # run state
         self.is_running = False
         self.processing = False        # the worker is mid-pipeline on a batch
+        self.keyframe_filter = True    # select keyframes; off keeps every frame
         self.log: Deque[str] = deque(maxlen=200)
         sys.stdout = _LogTail(sys.stdout, self.log)
         self.transport_thread = None
@@ -94,7 +95,8 @@ class AutoMappingServer:
         self.transporter = Transporter(self.cfg.batch_size, self.db,
                                        min_disparity=self.cfg.min_disparity,
                                        host=self.cfg.host, port=self.cfg.port,
-                                       temp_dir=self.temp_dir)
+                                       temp_dir=self.temp_dir,
+                                       keyframe_filter=self.keyframe_filter)
 
         print(f"[swiftmap-server] starting on {self.cfg.host}:{self.cfg.port} "
               f"(backbone={self.cfg.backbone}, batch_size={self.cfg.batch_size}, "
@@ -186,6 +188,7 @@ class AutoMappingServer:
         status = (self.transporter.batch_status() if self.transporter else
                   {"collected": 0, "capacity": self.cfg.batch_size, "latest": None})
         status["processing"] = self.processing
+        status["keyframe_filter"] = self.keyframe_filter
         status["log"] = self.recent_log()
         return status
 
@@ -208,11 +211,17 @@ class AutoMappingServer:
             return {"error": "No frames collected yet."}
         return {"success": True, "map_id": map_id}
 
+    def set_keyframe_filter(self, enabled: bool) -> Dict[str, Any]:
+        """Select keyframes from the frames that follow, or keep every one of them."""
+        self.keyframe_filter = bool(enabled)
+        if self.transporter:
+            self.transporter.set_keyframe_filter(self.keyframe_filter)
+        return {"success": True, "enabled": self.keyframe_filter}
+
     def del_map(self, map_id: str) -> Dict[str, Any]:
         """Delete a stored map, and drop what it contributed to the site."""
         if not self.db.del_map(map_id):
             return {"error": f"Unknown map '{map_id}'."}
-        self.db.get_site().write2disk()     # the site no longer includes it
         return {"success": True, "map_id": map_id}
 
     @staticmethod

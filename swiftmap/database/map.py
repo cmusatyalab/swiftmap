@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
 
+from swiftmap import constants
 from swiftmap.database.types import (CameraPose, GPS, FlightPlan, Georeference,
                                      PointCloud)
 
@@ -123,6 +124,15 @@ class Map:
     def update_pointcloud(self, reconstruction: PointCloud):
         self.reconstructed_results = reconstruction
 
+    def confidence_stats(self) -> Optional[dict]:
+        pt = self.reconstructed_results
+        if pt is None or pt.world_points is None:
+            return None
+        conf = pt.flatten_conf()[pt.confidence_mask(constants.DEFAULT_CONF_THRESHOLD)]
+        return {"num_points": int(len(conf)),
+                "mean_confidence": float(conf.mean()) if len(conf) else None,
+                "median_confidence": float(np.median(conf)) if len(conf) else None}
+
 # ================================================================== plan        
     def get_flight_plan(self) -> FlightPlan:
         return self.flight_plan
@@ -137,6 +147,21 @@ class Map:
     def update_georeference(self, georeference: Georeference):
         self.gps_aligned_results = georeference
         self.meta.gps_aligned = georeference is not None
+
+    def to_geojson(self) -> dict:
+        georef = self.gps_aligned_results
+        stats = self.confidence_stats() or {}
+        return {"type": "FeatureCollection", "features": [{
+            "type": "Feature",
+            "geometry": {"type": "Point",
+                         "coordinates": [georef.lla0[1], georef.lla0[0], georef.lla0[2]]},
+            "properties": {"layer": "scene_origin",
+                           "model": "scene_geo.glb",
+                           "description": "model local (0,0,0); the first keyframe's GPS fix",
+                           "altitude_mode": "absolute",
+                           "scale": georef.scale,
+                           "mean_confidence": stats.get("mean_confidence"),
+                           "median_confidence": stats.get("median_confidence")}}]}
 
 
 
@@ -261,7 +286,7 @@ class Map:
             if pt.geo_scene is not None:
                 pt.geo_scene.export(self._artifact(self.georeferenced_dir, "scene_geo.glb"))
                 with open(self._artifact(self.georeferenced_dir, "scene_geo.geojson"), "w") as f:
-                    json.dump(pt.to_geojson(self.gps_aligned_results), f, indent=2)
+                    json.dump(self.to_geojson(), f, indent=2)
                 cam_kml = pt.cameras_to_kml(self.gps_aligned_results)
                 if cam_kml is not None:
                     with open(self._artifact(self.georeferenced_dir, "camera_poses.kml"), "w") as f:

@@ -35,6 +35,11 @@ VGGT_OMEGA_IMAGE_RESOLUTION = int(os.environ.get("VGGT_OMEGA_IMAGE_RESOLUTION", 
 # Percentile band that marks "to-improve" (low-but-not-lowest confidence) regions.
 NFN_LOW_PERCENTILE = 60.0
 NFN_HIGH_PERCENTILE = 80.0
+NFN_CELL_SIZE_M = 5.0
+NFN_STANDOFF_M = 15.0
+NFN_TILT_DEG = 35.0
+NFN_MIN_CLUSTER_POINTS = 30
+NFN_MAX_VIEWPOINTS = int(os.environ.get("NFN_MAX_VIEWPOINTS", "10"))
 
 # --- Semantic segmentation -----------------------------------------
 # Point SAM3_CHECKPOINT at a local .pt; empty falls back to the facebook/sam3 hub.

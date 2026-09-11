@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional
 from swiftmap.core.pipeline.next_flight_planner import postprocess
 from swiftmap.database.map import Map
 from swiftmap.database.types import CameraPose, Cluster, FlightPlan, Viewpoint
-
+from swiftmap import constants
 
 class NextFlightPlanner:
     def __init__(self):
@@ -48,13 +48,13 @@ class NextFlightPlanner:
         """
 
         self.default_params = {
-            "low_percentile": 60.0,
-            "high_percentile": 80.0,
-            "cell_size_m": 5.0,
-            "standoff_m": 15.0,
-            "tilt_deg": 35.0,
-            "min_cluster_points": 30,
-            "max_viewpoints": 20,
+            "low_percentile": constants.NFN_LOW_PERCENTILE,
+            "high_percentile": constants.NFN_HIGH_PERCENTILE,
+            "cell_size_m": constants.NFN_CELL_SIZE_M,
+            "standoff_m": constants.NFN_STANDOFF_M,
+            "tilt_deg": constants.NFN_TILT_DEG,
+            "min_cluster_points": constants.NFN_MIN_CLUSTER_POINTS,
+            "max_viewpoints": constants.NFN_MAX_VIEWPOINTS,
         }
 
     def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

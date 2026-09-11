@@ -4,9 +4,11 @@
 TCP Server for SwiftMap Mapping System
 
 Receives frame+GPS pairs from a drone client over TCP. Each frame is checked against
-``keyframe_selector``; keyframes are saved to disk and appended to the open batch. Once
-the batch reaches ``batch_size`` it is queued, ready for ``next_map_id()`` to hand to a
-reconstruction worker. The wire format lives in ``swiftmap.server.transport.protocol``.
+``keyframe_selector`` (with the keyframe filter off, every frame passes); keyframes are
+saved to disk and appended to the open batch. Once the batch reaches ``batch_size`` it
+is queued, ready for handing to a reconstruction worker. 
+
+The wire format lives in ``swiftmap.server.transport.protocol``.
 """
 
 import os
@@ -35,11 +37,12 @@ class Transporter:
     def __init__(self, batch_size: int, db,
                  min_disparity: float = constants.DEFAULT_MIN_DISPARITY,
                  host: str = "0.0.0.0", port: int = protocol.TCP_PORT,
-                 temp_dir: Optional[str] = None):
+                 temp_dir: Optional[str] = None, keyframe_filter: bool = True):
         
         self.host = host
         self.port = port
         self.keyframe_selector = KeyframeSelector(min_disparity=min_disparity)
+        self.keyframe_filter = keyframe_filter      # off: keep every frame, unselected
         self.batch_size = batch_size
         self.db: Database  = db
 
@@ -251,6 +254,15 @@ class Transporter:
         return payload
 
     # ===================================================== keyframe selection & batching
+    def set_keyframe_filter(self, enabled: bool):
+        """Select keyframes from the frames that follow, or keep every one of them."""
+        if enabled and not self.keyframe_filter:
+            # the tracker still holds the last keyframe from before the filter went off;
+            # restart it, so the next frame becomes its fresh reference
+            self.keyframe_selector.frame_tracker.reset()
+        self.keyframe_filter = enabled
+        print(f"[transport] keyframe filter {'on' if enabled else 'off'}")
+
     def process_received_image(self, image: np.ndarray, metadata: Dict[str, Any]) -> bool:
         """Select or drop a frame; a selected frame is saved and joins the open batch."""
         try:
@@ -258,7 +270,7 @@ class Transporter:
             self.stats["total_frames"] = self.total_frames_received
             self.stats["last_frame_time"] = metadata["timestamp"]
 
-            if not self.keyframe_selector.is_keyframe(image):
+            if self.keyframe_filter and not self.keyframe_selector.is_keyframe(image):
                 print(f"Frame skipped: {self.total_frames_received} (not a keyframe)")
                 return False
 

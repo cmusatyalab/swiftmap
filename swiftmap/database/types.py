@@ -103,21 +103,6 @@ class PointCloud:
         """Camera positions as (S, 3)."""
         return np.array([c.position for c in self.cameras], dtype=float).reshape(-1, 3)
 
-    def to_geojson(self, georef: "Georeference") -> dict:
-        """scene_geo.geojson: where scene_geo.glb's local (0, 0, 0) sits on Earth.
-
-        glTF carries no coordinate system, so the mesh ships with its origin beside it.
-        """
-        return {"type": "FeatureCollection", "features": [{
-            "type": "Feature",
-            "geometry": {"type": "Point",
-                         "coordinates": [georef.lla0[1], georef.lla0[0], georef.lla0[2]]},
-            "properties": {"layer": "scene_origin",
-                           "model": "scene_geo.glb",
-                           "description": "model local (0,0,0); the first keyframe's GPS fix",
-                           "altitude_mode": "absolute",
-                           "scale": georef.scale}}]}
-
     def cameras_to_kml(self, georef: "Georeference") -> Optional[str]:
         """camera_poses.kml: a placemark where each keyframe was shot."""
         if not self.cameras:
