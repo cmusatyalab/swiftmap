@@ -62,12 +62,8 @@ class PointCloud:
         # ---- gps transformer
         self.geo_scene = None            # trimesh.Scene -- scene_geo.glb (ENU metres)
 
-        # ---- segmentor
-        self.segmented_worldpoints: List["SegmentedTarget"] = []
-
         self.scene = None                # trimesh.Scene -- scene.glb
         self.confidence_scene = None     # trimesh.Scene -- scene_confidence.glb
-        self.segmented_scene = None      # trimesh.Scene -- seg_scene.glb
         self.model_input = None          # [(filename, jpeg bytes)] -- model_input/
 
     def __repr__(self):
@@ -116,17 +112,6 @@ class PointCloud:
                 '<kml xmlns="http://www.opengis.net/kml/2.2">\n  <Document>\n'
                 '    <name>camera_poses</name>\n'
                 f'{placemarks}\n  </Document>\n</kml>\n')
-
-    def add_segmentation(self, query: str, points: np.ndarray) -> "SegmentedTarget":
-        """Append one query's lifted points, giving it a hue no earlier target has used."""
-        import colorsys
-        self.segmented_worldpoints = [t for t in self.segmented_worldpoints if t.query != query]
-        hue = (len(self.segmented_worldpoints) * 0.6180339887) % 1.0     # golden-angle spacing
-        color = np.array([int(255 * v) for v in colorsys.hsv_to_rgb(hue, 0.9, 1.0)],
-                         dtype=np.uint8)
-        target = SegmentedTarget(query, points, color)
-        self.segmented_worldpoints.append(target)
-        return target
 
 
 # ========================================================= reconstructor
@@ -334,7 +319,7 @@ class SegmentedTarget:
 
     def __init__(self, query: str, points: np.ndarray, color: np.ndarray):
         self.query = query
-        self.points = points          # (M, 3) local reconstruction coords
+        self.points = points          # (M, 3) site ENU metres
         self.color = color            # (3,) uint8, this target's scene colour
 
     def __repr__(self):

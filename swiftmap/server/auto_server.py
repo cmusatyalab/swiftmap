@@ -181,7 +181,26 @@ class AutoMappingServer:
         site = self.db.get_site()
         return {name: self._existing(site.path, filename) for name, filename in
                 (("scene", "site.glb"), ("confidence", "site_confidence.glb"),
-                 ("merged", "merged_res.glb"))}
+                 ("merged", "merged_res.glb"), ("seg", "seg_site.glb"))}
+
+    def segment_site(self, query: str) -> Dict[str, Any]:
+        """Lift one text query into the site; targets accumulate across queries.
+
+        ``processing`` stays untouched: it means the worker is mapping a batch nobody
+        clicked for, and this is click-driven, so the viewer's own scrim covers it.
+        """
+        result = self.session.segment(query)
+        if "error" in result:
+            return result
+        self.db.get_site().write2disk()
+        return result
+
+    def clear_segmentations(self) -> Dict[str, Any]:
+        """Drop every segmented target the site has accumulated."""
+        site = self.db.get_site()
+        cleared = site.clear_segmentations()
+        site.write2disk()
+        return {"success": True, "cleared": cleared}
 
     def batch_status(self) -> Dict[str, Any]:
         """How full the open batch is, plus whether the worker is busy with one."""

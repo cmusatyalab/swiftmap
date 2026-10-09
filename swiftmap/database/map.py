@@ -265,9 +265,6 @@ class Map:
                 pt.confidence_scene.export(
                     self._artifact(self.local_dir, "scene_confidence.glb"))
 
-            if pt.segmented_scene is not None:
-                pt.segmented_scene.export(self._artifact(self.local_dir, "seg_scene.glb"))
-
             if pt.model_input is not None:
                 for name, data in pt.model_input:
                     with open(self._artifact(self.model_input_dir, name), "wb") as f:

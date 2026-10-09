@@ -19,7 +19,8 @@ import os
 # What the Site tab offers, and which site_scenes() key each one shows.
 SITE_VIEWS = {"Points": "scene",
               "Confidence": "confidence",
-              "Source": "merged"}
+              "Source": "merged",
+              "Segmentation": "seg"}
 
 # A full-viewport scrim, shown while an action runs so nothing else can be clicked. A
 # class, not an id: viewer actions and the worker each raise their own.
@@ -79,7 +80,9 @@ def build_viewer(server):
         return scenes.get("scene"), scenes.get("confidence"), _map_status(server, map_id)
 
     def show_site(view):
-        return server.site_scenes().get(SITE_VIEWS[view])
+        """The chosen view's GLB; the prompt belongs to the Segmentation view alone."""
+        return (server.site_scenes().get(SITE_VIEWS[view]),
+                gr.update(visible=view == "Segmentation"))
 
     def tick(current, listed):
         """Poll the worker for the map list, the open batch, and the site's summary.
@@ -111,6 +114,21 @@ def build_viewer(server):
         server.set_keyframe_filter(enabled)
         return ("Keyframe filter **on**: only frames that add enough motion are kept."
                 if enabled else "Keyframe filter **off**: every frame that arrives is kept.")
+
+    def do_clear_seg():
+        """Throw away every target, leaving the Segmentation view empty."""
+        result = server.clear_segmentations()
+        return (server.site_scenes().get("seg"),
+                f"Cleared {result['cleared']} segmented target(s).")
+
+    def do_segment(query):
+        """Run the query over the whole site, then show the accumulated targets."""
+        result = server.segment_site(query)
+        if "error" in result:
+            return gr.skip(), f"**Error:** {result['error']}"
+        return (server.site_scenes().get("seg"),
+                f"`{result['query']}`: {result['num_points']:,} points.  \n"
+                f"Targets so far: {', '.join(result['targets'])}")
 
     def do_delete(map_id):
         if not map_id:
@@ -155,10 +173,21 @@ def build_viewer(server):
             site_status = gr.Markdown("Waiting for the first map.")
             site_view = gr.Radio(list(SITE_VIEWS), value=next(iter(SITE_VIEWS)),
                                  label="View", info="One at a time -- the site cloud is large")
+            with gr.Column(visible=False) as seg_panel:
+                with gr.Group():
+                    with gr.Row(equal_height=True):
+                        seg_query = gr.Textbox(
+                            show_label=False, container=False, scale=8, max_lines=1,
+                            placeholder="What to find in the site, e.g. red car")
+                        seg_btn = gr.Button("Run", variant="primary", size="sm",
+                                            scale=0, min_width=80)
+                        seg_clear = gr.Button("Clear", variant="stop", size="sm",
+                                              scale=0, min_width=80)
+                seg_msg = gr.Markdown()
             site_model = gr.Model3D(label="Site", height=560)
 
         listed = gr.State([])       # map ids the dropdown already offers
-        on = lambda: gr.update(visible=True)
+        on = lambda note: (lambda *_: gr.update(visible=True, value=_busy_html(note)))
         off = lambda: gr.update(visible=False)
 
         poll = [map_dd, site_status, frame_status, latest, listed, mapping]
@@ -171,22 +200,31 @@ def build_viewer(server):
 
         # 3D views load with their tab, so they are never handed a value while hidden
         map_tab.select(show_map, inputs=[map_dd], outputs=map_views)
-        site_tab.select(show_site, inputs=[site_view], outputs=[site_model])
-        site_view.change(show_site, inputs=[site_view], outputs=[site_model])
+        site_views = [site_model, seg_panel]      # what show_site fills
+        site_tab.select(show_site, inputs=[site_view], outputs=site_views)
+        site_view.change(show_site, inputs=[site_view], outputs=site_views)
         map_dd.change(show_map, inputs=[map_dd], outputs=map_views)
 
         # every action greys the viewport until it returns
-        clear_btn.click(on, outputs=[busy]).then(
+        clear_btn.click(on("Clearing the collected frames…"), outputs=[busy]).then(
             do_clear, outputs=[frame_msg]).then(off, outputs=[busy])
-        render_btn.click(on, outputs=[busy]).then(
+        render_btn.click(on("Queuing the batch for mapping…"), outputs=[busy]).then(
             do_render, outputs=[frame_msg]).then(off, outputs=[busy])
         # only flips a flag, so no scrim; always_last, so the server ends on the last click
         kf_filter.input(do_filter, inputs=[kf_filter], outputs=[frame_msg],
                         trigger_mode="always_last")
-        map_refresh.click(on, outputs=[busy]).then(
+        map_refresh.click(on("Loading the map…"), outputs=[busy]).then(
             show_map, inputs=[map_dd], outputs=map_views).then(off, outputs=[busy])
-        map_del.click(on, outputs=[busy]).then(
+        map_del.click(on("Deleting the map…"), outputs=[busy]).then(
             do_delete, inputs=[map_dd], outputs=[map_dd, map_msg]).then(off, outputs=[busy])
+        for start in (seg_btn.click, seg_query.submit):      # the button, or Enter
+            start(lambda q: gr.update(visible=True, value=_busy_html(
+                f"Segmenting the site for '{q}'…")), inputs=[seg_query],
+                outputs=[busy]).then(
+                do_segment, inputs=[seg_query],
+                outputs=[site_model, seg_msg]).then(off, outputs=[busy])
+        seg_clear.click(on("Clearing the segmented targets…"), outputs=[busy]).then(
+            do_clear_seg, outputs=[site_model, seg_msg]).then(off, outputs=[busy])
 
     return demo
 

@@ -17,9 +17,10 @@ import trimesh
 
 from swiftmap import constants
 from swiftmap.database.map import Map
-from swiftmap.database.types import GPS
+from swiftmap.database.types import GPS, SegmentedTarget
 
 _VOXEL_SIZE = 0.1       # metres; cells this size collapse to one point
+_BACKGROUND_DIM = 0.35  # segmented targets should read against a muted site
 # Confidence colours span a fixed range, not each write's own min/max, so the ramp means
 # the same thing every iteration and the site can be compared with itself as it grows.
 _CONF_RANGE = (0.0, 25.0)
@@ -42,6 +43,7 @@ class Site:
         self.colors: Optional[np.ndarray] = None
         self.conf: Optional[np.ndarray] = None
         self.source: Optional[np.ndarray] = None   # index into self.maps, per point
+        self.segments: List[SegmentedTarget] = []  # one per text query, kept across queries
 
     def __repr__(self):
         return (f"Site(maps={len(self.maps)}, "
@@ -89,6 +91,7 @@ class Site:
         self.conf, self.source = self.conf[keep], self.source[keep]
         self.source[self.source > index] -= 1      # close the gap the removal leaves
         self.maps.pop(index)
+        self.segments = []      # segments carry no source, so the dropped map's would linger
         print(f"[site] dropped {dropped.meta.name}: {len(self.maps)} maps, "
               f"{len(self.points)} points")
         return True
@@ -119,9 +122,53 @@ class Site:
         with open(os.path.join(self.path, "site.geojson"), "w") as f:
             json.dump(self.to_geojson(), f, indent=2)
 
+        seg_glb = os.path.join(self.path, "seg_site.glb")
+        if not self.segments and os.path.isfile(seg_glb):
+            os.remove(seg_glb)          # nothing left to show; drop the stale scene
+        if self.segments:
+            by_seg = trimesh.Scene()
+            background = (self.colors * _BACKGROUND_DIM).astype(np.uint8)
+            by_seg.add_geometry(trimesh.PointCloud(vertices=vertices, colors=background),
+                                geom_name="site")
+            for target in self.segments:
+                if not len(target.points):
+                    continue
+                by_seg.add_geometry(
+                    trimesh.PointCloud(vertices=target.points @ _ENU_TO_YUP.T,
+                                       colors=np.tile(target.color, (len(target.points), 1))),
+                    geom_name=target.query)      # node name is the viewer's label
+            by_seg.export(seg_glb)
+
         # the GLBs carry only position and colour; keep what a future merge needs
         np.savez_compressed(os.path.join(self.path, "site_points.npz"),
                             conf=self.conf.astype(np.float32), source=self.source)
+        # seg_site.glb loses the query strings, so the targets are stored separately
+        np.savez_compressed(os.path.join(self.path, "site_segments.npz"),
+                            queries=np.array([t.query for t in self.segments], dtype=object),
+                            colors=np.array([t.color for t in self.segments]).reshape(-1, 3),
+                            counts=np.array([len(t.points) for t in self.segments]),
+                            points=(np.vstack([t.points for t in self.segments])
+                                    if self.segments else np.zeros((0, 3))))
+
+    def add_segmentation(self, query: str, points: np.ndarray) -> SegmentedTarget:
+        """Store one query's lifted points, giving it a hue no earlier target has used.
+
+        Targets accumulate across queries; re-asking an earlier query replaces it.
+        """
+        import colorsys
+        self.segments = [t for t in self.segments if t.query != query]
+        hue = (len(self.segments) * 0.6180339887) % 1.0      # golden-angle spacing
+        color = np.array([int(255 * v) for v in colorsys.hsv_to_rgb(hue, 0.9, 1.0)],
+                         dtype=np.uint8)
+        target = SegmentedTarget(query, points, color)
+        self.segments.append(target)
+        return target
+
+    def clear_segmentations(self) -> int:
+        """Drop every segmented target; how many were removed."""
+        count = len(self.segments)
+        self.segments = []
+        return count
 
     def conf_colors(self) -> np.ndarray:
         """Per-point RGBA over a fixed confidence range: red (low) to green (high)."""
@@ -171,8 +218,22 @@ class Site:
         arrays = np.load(os.path.join(self.path, "site_points.npz"))
         self.conf = arrays["conf"].astype(float)
         self.source = arrays["source"]
-        print(f"[site] loaded {len(self.points)} points from {len(self.maps)} maps")
+        self._load_segments()
+        print(f"[site] loaded {len(self.points)} points from {len(self.maps)} maps, "
+              f"{len(self.segments)} segmented target(s)")
         return True
+
+    def _load_segments(self):
+        """Restore the accumulated segmentation targets, if an earlier query wrote any."""
+        path = os.path.join(self.path, "site_segments.npz")
+        if not os.path.isfile(path):
+            return
+        arrays = np.load(path, allow_pickle=True)
+        bounds = np.cumsum(arrays["counts"])[:-1]
+        self.segments = [SegmentedTarget(str(query), points, color)
+                         for query, color, points in
+                         zip(arrays["queries"], arrays["colors"],
+                             np.split(arrays["points"], bounds))]
 
     def to_geojson(self) -> dict:
         """site.geojson: where site.glb's local (0, 0, 0) sits on Earth."""

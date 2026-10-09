@@ -2,11 +2,13 @@
 
 """Backbone-agnostic text-promptable segmentation interface.
 
-A ``BaseSegmenter`` takes the frames a reconstruction backbone actually ran on
-(VGGT's internal, resized images — pixel-aligned with its world-point map) plus a
-text query like ``"person"`` and returns a per-frame boolean mask. Because the
-masks live on the same (H, W) grid as ``world_points``, turning a mask into 3D
-points is a direct index -- no camera projection.
+A ``BaseSegmenter`` takes a text query like ``"person"`` and runs it over the frames
+every map in the site was reconstructed from (VGGT's internal, resized images --
+pixel-aligned with its world-point map), returning a per-frame boolean mask. Because
+the masks live on the same (H, W) grid as ``world_points``, turning a mask into 3D
+points is a direct index -- no camera projection. Each map's matches are then carried
+into the site's shared ENU frame by its own Georeference, so a query spans the whole
+site; targets accumulate on the Site across queries.
 
 Concrete backends (e.g. SAM 3) implement ``initialize_model`` and
 ``_segment_image``; the base class handles lazy init and the per-frame loop.
@@ -20,8 +22,7 @@ import numpy as np
 import torch
 
 from swiftmap import constants
-from swiftmap.core.pipeline.segmentor import postprocess
-from swiftmap.database.map import Map
+from swiftmap.database.site import Site
 
 
 class BaseSegmenter(ABC):
@@ -50,8 +51,8 @@ class BaseSegmenter(ABC):
         """
 
     # ---------------------------------------------------------- orchestration
-    def run(self, map: Map, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Segment one query over the Map's frames and lift the matching pixels into 3D."""
+    def run(self, site: Site, processing_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Segment one query over every map's frames and lift the matches into the site."""
         params = {"query": "", "conf_threshold": constants.DEFAULT_CONF_THRESHOLD}
         if processing_params:
             params.update(processing_params)
@@ -59,25 +60,32 @@ class BaseSegmenter(ABC):
         query = (params["query"] or "").strip()
         if not query:
             return {"error": "Enter a segmentation query (e.g. 'person')."}
-        pt = map.get_pointcloud()
-        if pt is None or pt.world_points is None or pt.images is None:
-            return {"error": "No reconstruction to segment"}
+        if site.origin is None or not site.maps:
+            return {"error": "No site to segment"}
 
         segment_start = time.time()
-        masks = self._segment(self._reshape_images(pt.images), query)
-        if masks is None:
-            return {"error": f"{self.name} failed to initialize"}
+        lla0 = (site.origin.latitude, site.origin.longitude, site.origin.altitude or 0.0)
+        lifted, pixels = [], 0
+        for map_ in site.maps:
+            pt, georef = map_.get_pointcloud(), map_.get_georeference()
+            if pt is None or pt.world_points is None or pt.images is None or georef is None:
+                continue
+            masks = self._segment(self._reshape_images(pt.images), query)
+            if masks is None:
+                return {"error": f"{self.name} failed to initialize"}
+            # world_points is pixel-aligned with the frames, so the mask indexes 3D directly.
+            keep = masks.reshape(-1) & pt.confidence_mask(params["conf_threshold"])
+            pixels += int(masks.sum())
+            if keep.any():
+                lifted.append(georef.to_enu(pt.flatten_points()[keep], lla0))
 
-        # world_points is pixel-aligned with the frames, so the mask indexes 3D directly.
-        keep = masks.reshape(-1) & pt.confidence_mask(params["conf_threshold"])
-        target = pt.add_segmentation(query, pt.flatten_points()[keep])
-        postprocess.generate_seg_scene(map, params)
-
+        target = site.add_segmentation(query, np.vstack(lifted) if lifted
+                                       else np.zeros((0, 3)))
         segment_time = time.time() - segment_start
-        print(f"[{self.name}] '{query}': {len(target.points)} points from "
-              f"{int(masks.sum())} pixels in {segment_time:.2f}s")
+        print(f"[{self.name}] '{query}': {len(target.points)} points from {pixels} pixels "
+              f"across {len(site.maps)} map(s) in {segment_time:.2f}s")
         return {"success": True, "query": query, "num_points": int(len(target.points)),
-                "targets": [t.query for t in pt.segmented_worldpoints],
+                "targets": [t.query for t in site.segments],
                 "timing": {"segmentation": segment_time}}
 
     @staticmethod
