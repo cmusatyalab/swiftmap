@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 # Copyright (C) 2024 Carnegie Mellon University
 """
-SwiftMap minimal headless server: starts the TCP transport and blocks.
+SwiftMap server: starts the TCP transport and the results viewer, and blocks.
 
 Collects frame+GPS pairs over TCP and, as each batch fills, runs it through the
-pipeline: reconstruction -> GPS alignment -> next-flight planning. Site growth and
-segmentation are not wired up yet.
+pipeline: reconstruction -> GPS alignment -> next-flight planning, then merges it into
+the site. Segmentation runs on demand from the viewer.
 
-Config is read from env vars (below), overridable by CLI flags:
+Config is read from env vars (below; template.env documents the rest), overridable
+by CLI flags:
 
     SWIFTMAP_HOST            bind address              (default 0.0.0.0)
     SWIFTMAP_PORT            TCP port                  (default 43322)
-    SWIFTMAP_BACKBONE        vggt | vggt_omega         (default vggt)
+    SWIFTMAP_BACKBONE        vggt | vggt_omega         (default vggt_omega)
     SWIFTMAP_SEGMENTER       segmentation model        (default sam3)
-    SWIFTMAP_BATCH_SIZE      keyframes per batch       (default 70)
+    SWIFTMAP_BATCH_SIZE      keyframes per batch       (default 25)
     SWIFTMAP_MIN_DISPARITY   keyframe-selection px     (default 40)
     SWIFTMAP_OUTPUT_DIR      export dir (mount this)   (default output)
     SWIFTMAP_VIEWER_PORT     results viewer            (default 7866)
 
 Usage:
-    python launch_server.py
-    python launch_server.py --backbone vggt --batch-size 30
+    uv run --env-file .env python launch_server.py
+    uv run --env-file .env python launch_server.py --backbone vggt --batch-size 30
 """
 
 import argparse
