@@ -17,7 +17,7 @@ DEFAULT_MAX_KEYFRAMES = 25
 # --- Reconstruction / confidence -------------------------------------------
 # Confidence threshold (percentile, %) used when filtering the point cloud.
 DEFAULT_CONF_THRESHOLD = 10.0
-DEFAULT_RECONSTRUCTOR = os.environ.get("SWIFTMAP_RECONSTRUCTOR", "vggt_omega")
+DEFAULT_RECONSTRUCTOR = os.environ.get("SWIFTMAP_BACKBONE", "vggt_omega")
 # Model asset URLs 
 VGGT_MODEL_URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
 SKYSEG_ONNX_URL = "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx"
@@ -26,9 +26,7 @@ SKYSEG_ONNX_PATH = os.path.join(
     "swiftmap", "skyseg.onnx")
 # VGGT-Omega
 # Omega loads from a local .pt (no hub); match the resolution to the checkpoint.
-VGGT_OMEGA_CHECKPOINT = os.environ.get(
-    "VGGT_OMEGA_CHECKPOINT",
-    "/home/ubuntu/xianglic/vggt-omega/checkpoints/vggt_omega_1b_512-002.pt")
+VGGT_OMEGA_CHECKPOINT = os.environ.get("VGGT_OMEGA_CHECKPOINT")
 VGGT_OMEGA_IMAGE_RESOLUTION = int(os.environ.get("VGGT_OMEGA_IMAGE_RESOLUTION", "512"))
 
 # --- Next-Flight Navigation ------------------------------------------
@@ -44,15 +42,14 @@ NFN_MAX_VIEWPOINTS = int(os.environ.get("NFN_MAX_VIEWPOINTS", "10"))
 # --- Semantic segmentation -----------------------------------------
 # Point SAM3_CHECKPOINT at a local .pt; empty falls back to the facebook/sam3 hub.
 SAM3_CHECKPOINT = os.environ.get("SAM3_CHECKPOINT", "")  # "" -> download from HF
-# BPE tokenizer vocab shipped in the SAM 3 repo assets (needed by the text encoder).
-SAM3_BPE_PATH = os.environ.get(
-    "SAM3_BPE_PATH",
-    "/home/ubuntu/xianglic/sam3/assets/bpe_simple_vocab_16e6.txt.gz")
+# BPE tokenizer vocab for the text encoder; unset uses the copy the sam3 package ships.
+SAM3_BPE_PATH = os.environ.get("SAM3_BPE_PATH")
 # Minimum SAM 3 instance confidence to keep a mask.
 SAM3_CONF_THRESHOLD = float(os.environ.get("SAM3_CONF_THRESHOLD", "0.5"))
 # Default segmentation backend (registered in swiftmap.core.pipeline.segmentor).
 DEFAULT_SEGMENTER = os.environ.get("SWIFTMAP_SEGMENTER", "sam3")
 # Segmented-object clustering (v1: spatial) --
 # eps is a fraction of the scene diagonal, so clustering is scale-invariant.
+# TODO: unused until the clustering algorithm is implemented.
 SEG_CLUSTER_EPS_FRACTION = float(os.environ.get("SEG_CLUSTER_EPS_FRACTION", "0.02"))
 SEG_CLUSTER_MIN_POINTS = int(os.environ.get("SEG_CLUSTER_MIN_POINTS", "20"))

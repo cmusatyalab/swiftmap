@@ -62,7 +62,7 @@ class VGGTOmegaReconstructor(BaseReconstructor):
             import os
             from vggt_omega.models import VGGTOmega
 
-            if not os.path.isfile(self.checkpoint_path):
+            if not self.checkpoint_path or not os.path.isfile(self.checkpoint_path):
                 raise FileNotFoundError(
                     f"VGGT-Omega checkpoint not found: {self.checkpoint_path}. "
                     f"Set the VGGT_OMEGA_CHECKPOINT env var or pass checkpoint_path.")

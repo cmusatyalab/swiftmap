@@ -26,9 +26,8 @@ SITE_DIRNAME = "site"
 class Database:
     """The result dir: every stored map under ``maps/``, plus the growing ``site/``."""
 
-    def __init__(self, root: str, site: str):
+    def __init__(self, root: str):
         self.root = root
-        self.site_name = site
         self.maps_dir = os.path.join(root, MAPS_DIRNAME)
         self.site_dir = os.path.join(root, SITE_DIRNAME)
         os.makedirs(self.maps_dir, exist_ok=True)

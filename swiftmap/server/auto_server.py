@@ -55,7 +55,6 @@ class ServerConfig:
     port: int = protocol.TCP_PORT
     backbone: str = constants.DEFAULT_RECONSTRUCTOR
     segmenter: str = constants.DEFAULT_SEGMENTER
-    site: str = "map"
     batch_size: int = constants.DEFAULT_MAX_KEYFRAMES
     min_disparity: float = constants.DEFAULT_MIN_DISPARITY
     output_dir: str = "output"
@@ -68,7 +67,7 @@ class AutoMappingServer:
         self.cfg = config
         os.makedirs(config.output_dir, exist_ok=True)
 
-        self.db = Database(os.path.abspath(config.output_dir), config.site)
+        self.db = Database(os.path.abspath(config.output_dir))
         self.session = MappingSession(self.db, backbone=[config.backbone, config.segmenter])
 
         # transport

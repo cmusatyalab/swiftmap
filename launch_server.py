@@ -13,7 +13,6 @@ Config is read from env vars (below), overridable by CLI flags:
     SWIFTMAP_PORT            TCP port                  (default 43322)
     SWIFTMAP_BACKBONE        vggt | vggt_omega         (default vggt)
     SWIFTMAP_SEGMENTER       segmentation model        (default sam3)
-    SWIFTMAP_SITE            site-tag prefix           (default map)
     SWIFTMAP_BATCH_SIZE      keyframes per batch       (default 70)
     SWIFTMAP_MIN_DISPARITY   keyframe-selection px     (default 40)
     SWIFTMAP_OUTPUT_DIR      export dir (mount this)   (default output)
@@ -21,7 +20,7 @@ Config is read from env vars (below), overridable by CLI flags:
 
 Usage:
     python launch_server.py
-    python launch_server.py --backbone vggt_omega --site drone-alpha
+    python launch_server.py --backbone vggt --batch-size 30
 """
 
 import argparse
@@ -51,7 +50,6 @@ def main() -> int:
     p.add_argument("--port", type=int, default=int(_env("SWIFTMAP_PORT", protocol.TCP_PORT)))
     p.add_argument("--backbone", default=_env("SWIFTMAP_BACKBONE", constants.DEFAULT_RECONSTRUCTOR))
     p.add_argument("--segmenter", default=_env("SWIFTMAP_SEGMENTER", constants.DEFAULT_SEGMENTER))
-    p.add_argument("--site", default=_env("SWIFTMAP_SITE", "map"))
     p.add_argument("--batch-size", type=int,
                    default=int(_env("SWIFTMAP_BATCH_SIZE", constants.DEFAULT_MAX_KEYFRAMES)))
     p.add_argument("--min-disparity", type=float,
@@ -64,7 +62,7 @@ def main() -> int:
 
     cfg = ServerConfig(
         host=args.host, port=args.port,
-        backbone=args.backbone, segmenter=args.segmenter, site=args.site,
+        backbone=args.backbone, segmenter=args.segmenter,
         batch_size=args.batch_size, min_disparity=args.min_disparity,
         output_dir=args.output_dir,
     )
