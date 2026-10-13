@@ -59,8 +59,8 @@ fix. The server runs every batch through this pipeline:
    `output/maps/`.
 3. **Reconstruction** — the backbone ([VGGT](https://github.com/facebookresearch/vggt) or
    VGGT-Omega, the default) predicts camera poses and a per-pixel point map.
-4. **GPS alignment** — Umeyama + ICP fit the camera trajectory to the GPS track, giving the map a
-   **Georeference** into ENU metres.
+4. **GPS alignment** — a closed-form Umeyama fit maps the camera trajectory onto the GPS track,
+   giving the map a **Georeference** into ENU metres.
 5. **Next Flight Navigation** — points in the 60th–80th confidence-percentile band are tiled into
    5 m ground cells; each well-populated cell yields a viewpoint at a 15 m stand-off and 35° tilt.
    The KML plan rides back to the client on the next TCP reply.
@@ -97,7 +97,7 @@ swift_map/
 │   │   ├── session.py            # MappingSession: process(map) and segment(query)
 │   │   └── pipeline/             # one stage per package, each with pluggable backends
 │   │       ├── reconstructor/    #   VGGT / VGGT-Omega (+ sky mask, scene export)
-│   │       ├── gps_transformer/  #   Umeyama + ICP alignment, georeferenced scene
+│   │       ├── gps_transformer/  #   Umeyama alignment, georeferenced scene
 │   │       ├── next_flight_planner/
 │   │       └── segmentor/        #   SAM 3, lifted into the site
 │   └── database/
