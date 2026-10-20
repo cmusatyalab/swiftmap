@@ -3,8 +3,9 @@
 """The ``Site``: a database's one growing map.
 
 Every georeferenced ``Map`` is merged into a common ENU frame about the first map's
-GPS origin, then collapsed onto a voxel grid so overlapping flights reinforce each
-other instead of stacking duplicate points.
+GPS origin, then collapsed onto a voxel grid where each cell keeps its most confident
+observation, so overlapping flights do not stack duplicate points. The site stays
+sorted by cell, so a merge sorts only the incoming batch, not the whole site.
 """
 
 import json
@@ -20,6 +21,7 @@ from swiftmap.database.map import Map
 from swiftmap.database.types import GPS, SegmentedTarget
 
 _VOXEL_SIZE = 0.1       # metres; cells this size collapse to one point
+_KEY_OFFSET = 1 << 20   # cell keys pack 21 bits per axis: +-2^20 cells (+-104 km at 0.1 m)
 _BACKGROUND_DIM = 0.35  # segmented targets should read against a muted site
 # Confidence colours span a fixed range, not each write's own min/max, so the ramp means
 # the same thing every iteration and the site can be compared with itself as it grows.
@@ -39,6 +41,7 @@ class Site:
         self.voxel_size = voxel_size
         self.maps: List[Map] = []
         self.origin: Optional[GPS] = None      # the first grown map's GPS origin
+        self.keys: Optional[np.ndarray] = None     # cell key per point, ascending
         self.points: Optional[np.ndarray] = None
         self.colors: Optional[np.ndarray] = None
         self.conf: Optional[np.ndarray] = None
@@ -63,22 +66,40 @@ class Site:
 
         keep = pt.confidence_mask(conf_threshold)
         points = georef.to_enu(pt.flatten_points()[keep], lla0)
-        colors = pt.flatten_colors()[keep]
-        conf = pt.flatten_conf()[keep]
-        source = np.full(len(points), len(self.maps), dtype=np.int64)
-
-        if self.points is not None:
-            points = np.vstack([self.points, points])
-            colors = np.vstack([self.colors, colors])
-            conf = np.concatenate([self.conf, conf])
-            source = np.concatenate([self.source, source])
-
-        self.points, self.colors, self.conf, self.source = _voxel_merge(
-            points, colors, conf, source, self.voxel_size)
+        self._merge(points, pt.flatten_colors()[keep], pt.flatten_conf()[keep],
+                    np.full(len(points), len(self.maps), dtype=np.int64))
         self.maps.append(new_map)
         print(f"[site] grew with {new_map.meta.name}: {len(self.maps)} maps, "
               f"{len(self.points)} points")
         return True
+
+    def _merge(self, points, colors, conf, source):
+        """Fold a batch in, keeping each cell's most confident point.
+
+        Only the batch is sorted. Its cells are found in the site by binary search,
+        replaced where the batch is more confident, and inserted where new. A maximum
+        does not depend on grouping, so this gives exactly the site that merging every
+        batch at once would; on a tie the existing site point stays.
+        """
+        keys = _cell_keys(points, self.voxel_size)
+        best = _best_per_cell(keys, conf)
+        batch = {"keys": keys[best], "points": points[best], "colors": colors[best],
+                 "conf": conf[best], "source": source[best]}
+        if self.keys is None:
+            for name, values in batch.items():
+                setattr(self, name, values)
+            return
+
+        pos = np.searchsorted(self.keys, batch["keys"])
+        hit = pos < len(self.keys)
+        hit[hit] = self.keys[pos[hit]] == batch["keys"][hit]
+        better = np.zeros_like(hit)
+        better[hit] = batch["conf"][hit] > self.conf[pos[hit]]
+        new = ~hit
+        for name, values in batch.items():
+            current = getattr(self, name)
+            current[pos[better]] = values[better]
+            setattr(self, name, np.insert(current, pos[new], values[new], axis=0))
 
     def drop(self, dropped: Map) -> bool:
         """Remove one map's contribution and re-index the rest"""
@@ -86,9 +107,9 @@ class Site:
             return False
 
         index = self.maps.index(dropped)
-        keep = self.source != index
-        self.points, self.colors = self.points[keep], self.colors[keep]
-        self.conf, self.source = self.conf[keep], self.source[keep]
+        keep = self.source != index                # a filter keeps the cell order
+        self.keys, self.points = self.keys[keep], self.points[keep]
+        self.colors, self.conf, self.source = self.colors[keep], self.conf[keep], self.source[keep]
         self.source[self.source > index] -= 1      # close the gap the removal leaves
         self.maps.pop(index)
         self.segments = []      # segments carry no source, so the dropped map's would linger
@@ -139,10 +160,9 @@ class Site:
                     geom_name=target.query)      # node name is the viewer's label
             by_seg.export(seg_glb)
 
-        # the GLBs carry only position and colour; keep what a future merge needs
         np.savez_compressed(os.path.join(self.path, "site_points.npz"),
-                            conf=self.conf.astype(np.float32), source=self.source)
-        # seg_site.glb loses the query strings, so the targets are stored separately
+                            conf=self.conf.astype(np.float32), source=self.source,
+                            keys=self.keys)
         np.savez_compressed(os.path.join(self.path, "site_segments.npz"),
                             queries=np.array([t.query for t in self.segments], dtype=object),
                             colors=np.array([t.color for t in self.segments]).reshape(-1, 3),
@@ -212,10 +232,12 @@ class Site:
         self.maps = [maps[i] for i in feature["properties"].get("map_ids", []) if i in maps]
 
         geometry = list(trimesh.load(cloud).geometry.values())[0]
-        self.points = np.asarray(geometry.vertices) @ np.linalg.inv(_ENU_TO_YUP).T
-        self.colors = np.asarray(geometry.colors)[:, :3]
-
         arrays = np.load(os.path.join(self.path, "site_points.npz"))
+        # the keys are stored, not re-derived: the GLB holds float32, and rounding can
+        # carry a point across a cell boundary
+        self.keys = arrays["keys"]
+        self.points = np.asarray(geometry.vertices) @ np.linalg.inv(_ENU_TO_YUP).T
+        self.colors = np.array(geometry.colors)[:, :3]
         self.conf = arrays["conf"].astype(float)
         self.source = arrays["source"]
         self._load_segments()
@@ -253,39 +275,24 @@ class Site:
                            "map_ids": [m.meta.name for m in self.maps]}}]}
 
 
-def _voxel_merge(points, colors, conf, source, voxel_size: float):
-    """Collapse points sharing a ``voxel_size`` grid cell into one, confidence-weighted.
+def _cell_keys(points: np.ndarray, voxel_size: float) -> np.ndarray:
+    """One int64 per point naming its ``voxel_size`` grid cell.
 
-    Position and color become the confidence-weighted mean of the cell; the merged
-    confidence is the cell's max, and the cell is credited to the map that contributed
-    its most confident point. ``voxel_size <= 0`` returns the input unchanged.
+    The packing is fixed, not fitted to the input's extent, so keys from different
+    merges compare directly.
     """
-    points = np.asarray(points, dtype=float)
-    if voxel_size <= 0 or len(points) == 0:
-        return points, np.asarray(colors), np.asarray(conf, dtype=float), np.asarray(source)
+    cells = np.floor(np.asarray(points, dtype=float) / voxel_size).astype(np.int64) + _KEY_OFFSET
+    if len(cells) and (cells.min() < 0 or cells.max() >= 2 * _KEY_OFFSET):
+        raise OverflowError("site wider than the cell keys cover; raise the voxel size")
+    return (cells[:, 0] << 42) | (cells[:, 1] << 21) | cells[:, 2]
 
-    w = np.asarray(conf, dtype=float)
-    vidx = np.floor(points / voxel_size).astype(np.int64)
-    vidx -= vidx.min(axis=0)
-    dims = vidx.max(axis=0) + 1
-    if dims.prod() >= np.iinfo(np.int64).max:
-        raise OverflowError("voxel grid too large for a linear key; raise the voxel size")
-    key = (vidx[:, 0] * dims[1] + vidx[:, 1]) * dims[2] + vidx[:, 2]
-    _, inv = np.unique(key, return_inverse=True)
 
-    g = inv.max() + 1
-    wsum = np.bincount(inv, weights=w, minlength=g)
-    wsafe = np.where(wsum > 0, wsum, 1.0)
-    pos = np.empty((g, 3))
-    col = np.empty((g, 3))
-    cols_f = np.asarray(colors, dtype=float)
-    for k in range(3):
-        pos[:, k] = np.bincount(inv, weights=w * points[:, k], minlength=g) / wsafe
-        col[:, k] = np.bincount(inv, weights=w * cols_f[:, k], minlength=g) / wsafe
-    mconf = np.zeros(g)
-    np.maximum.at(mconf, inv, w)
-    # visiting cells in ascending confidence leaves each one holding its best point's map
-    order = np.argsort(w, kind="stable")
-    msrc = np.zeros(g, dtype=np.int64)
-    msrc[inv[order]] = np.asarray(source)[order]
-    return pos, np.clip(col, 0, 255).astype(np.uint8), mconf, msrc
+def _best_per_cell(keys: np.ndarray, conf: np.ndarray) -> np.ndarray:
+    """Index of each cell's most confident point, in ascending cell order.
+
+    The sort is stable, so on a tie the earlier point wins.
+    """
+    order = np.lexsort((-np.asarray(conf, dtype=float), keys))
+    first = np.ones(len(order), dtype=bool)
+    first[1:] = keys[order[1:]] != keys[order[:-1]]
+    return order[first]
