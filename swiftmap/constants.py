@@ -48,8 +48,8 @@ SAM3_BPE_PATH = os.environ.get("SAM3_BPE_PATH")
 SAM3_CONF_THRESHOLD = float(os.environ.get("SAM3_CONF_THRESHOLD", "0.5"))
 # Default segmentation backend (registered in swiftmap.core.pipeline.segmentor).
 DEFAULT_SEGMENTER = os.environ.get("SWIFTMAP_SEGMENTER", "sam3")
-# Segmented-object clustering (v1: spatial) --
-# eps is a fraction of the scene diagonal, so clustering is scale-invariant.
-# TODO: unused until the clustering algorithm is implemented.
-SEG_CLUSTER_EPS_FRACTION = float(os.environ.get("SEG_CLUSTER_EPS_FRACTION", "0.02"))
-SEG_CLUSTER_MIN_POINTS = int(os.environ.get("SEG_CLUSTER_MIN_POINTS", "20"))
+SEG_LINK_VOXEL_M = 0.4
+SEG_LINK_CONTAINMENT = 0.3
+SEG_CROSS_VOXEL_M = 1.0
+SEG_CROSS_CONTAINMENT = 0.5
+SEG_MIN_SUPPORT = 2

@@ -4,11 +4,12 @@
 
 A ``BaseSegmenter`` takes a text query like ``"person"`` and runs it over the frames
 every map in the site was reconstructed from (VGGT's internal, resized images --
-pixel-aligned with its world-point map), returning a per-frame boolean mask. Because
-the masks live on the same (H, W) grid as ``world_points``, turning a mask into 3D
-points is a direct index -- no camera projection. Each map's matches are then carried
-into the site's shared ENU frame by its own Georeference, so a query spans the whole
-site; targets accumulate on the Site across queries.
+pixel-aligned with its world-point map), returning one mask per detected instance.
+Because the masks live on the same (H, W) grid as ``world_points``, turning a mask
+into 3D points is a direct index -- no camera projection. Each instance mask is
+lifted into the site's shared ENU frame by its map's Georeference, giving a fragment,
+and fragments of the same object across views and maps are associated into instances
+(see ``instances``). Targets accumulate on the Site across queries.
 
 Concrete backends (e.g. SAM 3) implement ``initialize_model`` and
 ``_segment_image``; the base class handles lazy init and the per-frame loop.
@@ -16,13 +17,16 @@ Concrete backends (e.g. SAM 3) implement ``initialize_model`` and
 
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 
 from swiftmap import constants
+from swiftmap.core.pipeline.segmentor.instances import Fragment, associate
 from swiftmap.database.site import Site
+
+Instances = List[Tuple[np.ndarray, float]]
 
 
 class BaseSegmenter(ABC):
@@ -42,12 +46,11 @@ class BaseSegmenter(ABC):
         """Load weights onto ``self.device``; set ``self.is_initialized``."""
 
     @abstractmethod
-    def _segment_image(self, image_rgb: np.ndarray, query: str) -> np.ndarray:
+    def _segment_image(self, image_rgb: np.ndarray, query: str) -> Instances:
         """Segment one RGB uint8 image (H, W, 3) for ``query``.
 
-        Returns a single ``(H, W)`` boolean mask — the union of all detected
-        instances of the concept (v1 is semantic; per-instance handling is a
-        future extension).
+        Returns each detected instance of the concept as its ``(H, W)`` boolean mask
+        and detection score; empty when nothing matches.
         """
 
     # ---------------------------------------------------------- orchestration
@@ -65,26 +68,35 @@ class BaseSegmenter(ABC):
 
         segment_start = time.time()
         lla0 = (site.origin.latitude, site.origin.longitude, site.origin.altitude or 0.0)
-        lifted, pixels = [], 0
-        for map_ in site.maps:
+        fragments = []
+        for batch, map_ in enumerate(site.maps):
             pt, georef = map_.get_pointcloud(), map_.get_georeference()
             if pt is None or pt.world_points is None or pt.images is None or georef is None:
                 continue
-            masks = self._segment(self._reshape_images(pt.images), query)
-            if masks is None:
+            frames = self._segment(self._reshape_images(pt.images), query)
+            if frames is None:
                 return {"error": f"{self.name} failed to initialize"}
-            # world_points is pixel-aligned with the frames, so the mask indexes 3D directly.
-            keep = masks.reshape(-1) & pt.confidence_mask(params["conf_threshold"])
-            pixels += int(masks.sum())
-            if keep.any():
-                lifted.append(georef.to_enu(pt.flatten_points()[keep], lla0))
+            reliable =pt.confidence_mask(params["conf_threshold"]).reshape(len(frames), -1)
+            points = pt.world_points.reshape(len(frames), -1, 3)
+            conf = pt.world_points_conf.reshape(len(frames), -1)
+            for frame, found in enumerate(frames):
+                for mask, score in found:
+                    keep = mask.reshape(-1) & reliable[frame]
+                    if keep.any():
+                        fragments.append(Fragment(georef.to_enu(points[frame][keep], lla0),
+                                                  conf[frame][keep], score, batch, frame))
 
-        target = site.add_segmentation(query, np.vstack(lifted) if lifted
-                                       else np.zeros((0, 3)))
+        target = site.add_segmentation(query, associate(fragments, site))
         segment_time = time.time() - segment_start
-        print(f"[{self.name}] '{query}': {len(target.points)} points from {pixels} pixels "
-              f"across {len(site.maps)} map(s) in {segment_time:.2f}s")
-        return {"success": True, "query": query, "num_points": int(len(target.points)),
+        print(f"[{self.name}] '{query}': {len(target.instances)} instance(s) from "
+              f"{len(fragments)} fragment(s) across {len(site.maps)} map(s) "
+              f"in {segment_time:.2f}s")
+        centres = site.origin.enu_to_lla([inst.centroid for inst in target.instances])
+        return {"success": True, "query": query, "num_fragments": len(fragments),
+                "instances": [{"latitude": lat, "longitude": lon, "altitude": alt,
+                               "support": inst.support, "score": inst.score,
+                               "points": len(inst.points)}
+                              for inst, (lat, lon, alt) in zip(target.instances, centres)],
                 "targets": [t.query for t in site.segments],
                 "timing": {"segmentation": segment_time}}
 
@@ -98,23 +110,22 @@ class BaseSegmenter(ABC):
             images = (np.clip(images, 0.0, 1.0) * 255).astype(np.uint8)
         return [np.ascontiguousarray(img) for img in images]
 
-    def _segment(self, images_rgb: List[np.ndarray], query: str) -> Optional[np.ndarray]:
-        """Segment a list of RGB uint8 frames; return ``(S, H, W)`` bool masks.
+    def _segment(self, images_rgb: List[np.ndarray], query: str) -> Optional[List[Instances]]:
+        """Segment a list of RGB uint8 frames; per frame, the instances found.
 
-        Frames must share (H, W) — they are VGGT's fixed-size internal images.
-        Returns None if the model can't initialize.
+        Frames must share (H, W) — they are VGGT's fixed-size internal images. A frame
+        that fails contributes no instances. Returns None if the model can't initialize.
         """
         if not self.is_initialized and not self.initialize_model():
             return None
-        if not images_rgb:
-            return None
 
-        masks = []
+        frames = []
         for i, img in enumerate(images_rgb):
             try:
-                m = self._segment_image(img, query)
+                found = [(np.asarray(m, dtype=bool), float(s))
+                         for m, s in self._segment_image(img, query)]
             except Exception as e:
                 print(f"[{self.name}] frame {i} segmentation failed: {e}")
-                m = np.zeros(img.shape[:2], dtype=bool)
-            masks.append(np.asarray(m, dtype=bool))
-        return np.stack(masks, axis=0)
+                found = []
+            frames.append(found)
+        return frames

@@ -126,9 +126,14 @@ def build_viewer(server):
         result = server.segment_site(query)
         if "error" in result:
             return gr.skip(), f"**Error:** {result['error']}"
+        rows = "\n".join(f"| {n} | {i['latitude']:.6f}, {i['longitude']:.6f} | {i['support']} "
+                         f"| {i['score']:.2f} |" for n, i in enumerate(result["instances"]))
+        table = ("\n\n| # | Lat, lon | Seen in | Score |\n|---|---|---|---|\n" + rows
+                 if rows else "")
         return (server.site_scenes().get("seg"),
-                f"`{result['query']}`: {result['num_points']:,} points.  \n"
-                f"Targets so far: {', '.join(result['targets'])}")
+                f"`{result['query']}`: {len(result['instances'])} instance(s) from "
+                f"{result['num_fragments']} fragment(s).  \n"
+                f"Targets so far: {', '.join(result['targets'])}{table}")
 
     def do_delete(map_id):
         if not map_id:

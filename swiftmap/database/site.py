@@ -18,7 +18,7 @@ import trimesh
 
 from swiftmap import constants
 from swiftmap.database.map import Map
-from swiftmap.database.types import GPS, SegmentedTarget
+from swiftmap.database.types import GPS, SegmentedInstance, SegmentedTarget
 
 _VOXEL_SIZE = 0.1       # metres; cells this size collapse to one point
 _KEY_OFFSET = 1 << 20   # cell keys pack 21 bits per axis: +-2^20 cells (+-104 km at 0.1 m)
@@ -103,8 +103,8 @@ class Site:
 
     def _cell_keys(self, points: np.ndarray, voxel_size: float) -> np.ndarray:
         """One 64-bit integer per point, encoding the cell it falls into."""
-        cells = np.floor(np.asarray(points, dtype=float) / voxel_size).astype(np.int64) + self._KEY_OFFSET
-        if len(cells) and (cells.min() < 0 or cells.max() >= 2 * self._KEY_OFFSET):
+        cells = np.floor(np.asarray(points, dtype=float) / voxel_size).astype(np.int64) + _KEY_OFFSET
+        if len(cells) and (cells.min() < 0 or cells.max() >= 2 * _KEY_OFFSET):
             raise OverflowError("site wider than the cell keys cover; raise the voxel size")
         return (cells[:, 0] << 42) | (cells[:, 1] << 21) | cells[:, 2]
 
@@ -167,35 +167,37 @@ class Site:
             by_seg.add_geometry(trimesh.PointCloud(vertices=vertices, colors=background),
                                 geom_name="site")
             for target in self.segments:
-                if not len(target.points):
-                    continue
-                by_seg.add_geometry(
-                    trimesh.PointCloud(vertices=target.points @ _ENU_TO_YUP.T,
-                                       colors=np.tile(target.color, (len(target.points), 1))),
-                    geom_name=target.query)      # node name is the viewer's label
+                for n, inst in enumerate(target.instances):
+                    shade = (target.color * (1.0 - 0.25 * (n % 3))).astype(np.uint8)
+                    by_seg.add_geometry(
+                        trimesh.PointCloud(vertices=inst.points @ _ENU_TO_YUP.T,
+                                           colors=np.tile(shade, (len(inst.points), 1))),
+                        geom_name=f"{target.query}/{n}")
             by_seg.export(seg_glb)
 
         np.savez_compressed(os.path.join(self.path, "site_points.npz"),
                             conf=self.conf.astype(np.float32), source=self.source,
                             keys=self.keys)
+        owned = [(t, inst) for t, target in enumerate(self.segments) for inst in target.instances]
         np.savez_compressed(os.path.join(self.path, "site_segments.npz"),
                             queries=np.array([t.query for t in self.segments], dtype=object),
                             colors=np.array([t.color for t in self.segments]).reshape(-1, 3),
-                            counts=np.array([len(t.points) for t in self.segments]),
-                            points=(np.vstack([t.points for t in self.segments])
-                                    if self.segments else np.zeros((0, 3))))
+                            owner=np.array([t for t, _ in owned], dtype=np.int64),
+                            support=np.array([i.support for _, i in owned], dtype=np.int64),
+                            score=np.array([i.score for _, i in owned], dtype=float),
+                            counts=np.array([len(i.points) for _, i in owned], dtype=np.int64),
+                            points=(np.vstack([i.points for _, i in owned])
+                                    if owned else np.zeros((0, 3))))
 
-    def add_segmentation(self, query: str, points: np.ndarray) -> SegmentedTarget:
-        """Store one query's lifted points, giving it a hue no earlier target has used.
-
-        Targets accumulate across queries; re-asking an earlier query replaces it.
-        """
+    def add_segmentation(self, query: str,
+                         instances: List[SegmentedInstance]) -> SegmentedTarget:
+        """Store one query's instances under a hue no earlier target used; a repeat replaces it."""
         import colorsys
         self.segments = [t for t in self.segments if t.query != query]
         hue = (len(self.segments) * 0.6180339887) % 1.0      # golden-angle spacing
         color = np.array([int(255 * v) for v in colorsys.hsv_to_rgb(hue, 0.9, 1.0)],
                          dtype=np.uint8)
-        target = SegmentedTarget(query, points, color)
+        target = SegmentedTarget(query, color, instances)
         self.segments.append(target)
         return target
 
@@ -260,11 +262,13 @@ class Site:
         if not os.path.isfile(path):
             return
         arrays = np.load(path, allow_pickle=True)
-        bounds = np.cumsum(arrays["counts"])[:-1]
-        self.segments = [SegmentedTarget(str(query), points, color)
-                         for query, color, points in
-                         zip(arrays["queries"], arrays["colors"],
-                             np.split(arrays["points"], bounds))]
+        self.segments = [SegmentedTarget(str(query), color, [])
+                         for query, color in zip(arrays["queries"], arrays["colors"])]
+        chunks = np.split(arrays["points"], np.cumsum(arrays["counts"])[:-1])
+        for owner, support, score, points in zip(arrays["owner"], arrays["support"],
+                                                 arrays["score"], chunks):
+            self.segments[owner].instances.append(
+                SegmentedInstance(points, int(support), float(score)))
 
     def to_geojson(self) -> dict:
         """site.geojson: where site.glb's local (0, 0, 0) sits on Earth."""

@@ -4,9 +4,8 @@
 
 Wraps Meta's SAM 3 image model behind ``BaseSegmenter``. SAM 3 does promptable
 *concept* segmentation: given a short phrase ("person") it detects and segments
-every instance of that concept. For v1 we union the per-instance masks into one
-semantic mask per frame; the per-instance masks remain available for a future
-tracked-instance upgrade.
+every instance of that concept. Each instance's mask is returned with its detection
+score; ``BaseSegmenter`` lifts them into 3D and associates them across views.
 
 Weights load from a local checkpoint (``constants.SAM3_CHECKPOINT``) or, if that
 is unset, are downloaded from the HuggingFace Hub by the SAM 3 builder. The heavy
@@ -14,7 +13,7 @@ is unset, are downloaded from the HuggingFace Hub by the SAM 3 builder. The heav
 """
 
 import os
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -73,7 +72,7 @@ class SAM3Segmenter(BaseSegmenter):
             self.is_initialized = False
             return False
 
-    def _segment_image(self, image_rgb: np.ndarray, query: str) -> np.ndarray:
+    def _segment_image(self, image_rgb: np.ndarray, query: str) -> List[Tuple[np.ndarray, float]]:
         from PIL import Image
 
         pil = Image.fromarray(np.ascontiguousarray(image_rgb), mode="RGB")
@@ -88,16 +87,17 @@ class SAM3Segmenter(BaseSegmenter):
 
         masks = state.get("masks")  # (N, 1, H, W) bool tensor at input resolution
         if masks is None or len(masks) == 0:
-            return np.zeros((h, w), dtype=bool)
+            return []
         if masks.ndim == 4:            # drop the channel dim -> (N, H, W)
             masks = masks.squeeze(1)
-        union = masks.any(dim=0)       # (H, W)
-        arr = union.detach().cpu().numpy().astype(bool)
-        if arr.shape != (h, w):        # safety: align exactly to the frame grid
+        masks = masks.detach().cpu().numpy().astype(bool)
+        scores = state["scores"].detach().float().cpu().numpy()
+        if masks.shape[1:] != (h, w):  # safety: align exactly to the frame grid
             import cv2
-            arr = cv2.resize(arr.astype(np.uint8), (w, h),
-                             interpolation=cv2.INTER_NEAREST).astype(bool)
-        return arr
+            masks = np.stack([cv2.resize(m.astype(np.uint8), (w, h),
+                                         interpolation=cv2.INTER_NEAREST).astype(bool)
+                              for m in masks])
+        return list(zip(masks, scores.tolist()))
 
 
 class _nullcontext:

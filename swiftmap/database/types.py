@@ -17,6 +17,14 @@ class GPS:
     def __repr__(self):
         return f"GPS(latitude={self.latitude}, longitude={self.longitude}, altitude={self.altitude})"
 
+    def enu_to_lla(self, enu) -> np.ndarray:
+        """ENU metres about this point -> (N, 3) [lat, lon, alt]."""
+        import pymap3d
+        enu = np.asarray(enu, dtype=float).reshape(-1, 3)
+        lat, lon, alt = pymap3d.enu2geodetic(enu[:, 0], enu[:, 1], enu[:, 2], self.latitude,
+                                             self.longitude, self.altitude or 0.0)
+        return np.column_stack([lat, lon, alt])
+
 class CameraPose:
     """One keyframe's world pose: camera centre and camera-to-world rotation."""
 
@@ -149,10 +157,7 @@ class Georeference:
 
     def enu_to_lla(self, enu) -> np.ndarray:
         """ENU metres (about this origin) -> (N, 3) [lat, lon, alt]."""
-        import pymap3d
-        enu = np.asarray(enu, dtype=float).reshape(-1, 3)
-        lat, lon, alt = pymap3d.enu2geodetic(enu[:, 0], enu[:, 1], enu[:, 2], *self.lla0)
-        return np.column_stack([lat, lon, alt])
+        return self.origin.enu_to_lla(enu)
 
     def to_json(self) -> dict:
         """transform.json payload."""
@@ -314,13 +319,35 @@ class FlightPlan:
 # ================================================================ segmentor
 
 
-class SegmentedTarget:
-    """One text query lifted to 3D: the world points whose pixels matched it."""
+class SegmentedInstance:
+    """One object found by a query: its fragments' points, merged across views."""
 
-    def __init__(self, query: str, points: np.ndarray, color: np.ndarray):
-        self.query = query
-        self.points = points          # (M, 3) site ENU metres
-        self.color = color            # (3,) uint8, this target's scene colour
+    def __init__(self, points: np.ndarray, support: int, score: float):
+        self.points = points
+        self.support = support
+        self.score = score
+
+    @property
+    def centroid(self) -> np.ndarray:
+        return self.points.mean(axis=0)
+
+    @property
+    def bbox(self):
+        """(min, max) corners, ENU metres."""
+        return self.points.min(axis=0), self.points.max(axis=0)
 
     def __repr__(self):
-        return f"SegmentedTarget(query={self.query!r}, num_points={len(self.points)})"
+        return (f"SegmentedInstance(points={len(self.points)}, support={self.support}, "
+                f"score={self.score:.2f})")
+
+
+class SegmentedTarget:
+    """One text query lifted to 3D: the instances whose pixels matched it."""
+
+    def __init__(self, query: str, color: np.ndarray, instances: List[SegmentedInstance]):
+        self.query = query
+        self.color = color
+        self.instances = instances
+
+    def __repr__(self):
+        return f"SegmentedTarget(query={self.query!r}, instances={len(self.instances)})"
