@@ -81,8 +81,8 @@ class Site:
         does not depend on grouping, so this gives exactly the site that merging every
         batch at once would; on a tie the existing site point stays.
         """
-        keys = _cell_keys(points, self.voxel_size)
-        best = _best_per_cell(keys, conf)
+        keys = self._cell_keys(points, self.voxel_size)
+        best = self._best_per_cell(keys, conf)
         batch = {"keys": keys[best], "points": points[best], "colors": colors[best],
                  "conf": conf[best], "source": source[best]}
         if self.keys is None:
@@ -100,6 +100,21 @@ class Site:
             current = getattr(self, name)
             current[pos[better]] = values[better]
             setattr(self, name, np.insert(current, pos[new], values[new], axis=0))
+
+    def _cell_keys(self, points: np.ndarray, voxel_size: float) -> np.ndarray:
+        """One 64-bit integer per point, encoding the cell it falls into."""
+        cells = np.floor(np.asarray(points, dtype=float) / voxel_size).astype(np.int64) + self._KEY_OFFSET
+        if len(cells) and (cells.min() < 0 or cells.max() >= 2 * self._KEY_OFFSET):
+            raise OverflowError("site wider than the cell keys cover; raise the voxel size")
+        return (cells[:, 0] << 42) | (cells[:, 1] << 21) | cells[:, 2]
+
+
+    def _best_per_cell(self, keys: np.ndarray, conf: np.ndarray) -> np.ndarray:
+        """Return the index of each cell's most confident point, in ascending cell order."""
+        order = np.lexsort((-np.asarray(conf, dtype=float), keys))
+        first = np.ones(len(order), dtype=bool)
+        first[1:] = keys[order[1:]] != keys[order[:-1]]
+        return order[first]
 
     def drop(self, dropped: Map) -> bool:
         """Remove one map's contribution and re-index the rest"""
@@ -201,21 +216,15 @@ class Site:
         return colors
 
     def map_colors(self) -> np.ndarray:
-        """Per-point RGB naming which map each point came from."""
-        return self._palette()[self.source]
+        """Per-point RGB naming which map each point came from.
 
-    def _palette(self) -> np.ndarray:
-        """One RGB per merged map, hues golden-angle apart so any count stays distinct."""
-        return np.array([self._palette_at(i) for i in range(max(len(self.maps), 1))],
-                        dtype=np.uint8)
-
-    @staticmethod
-    def _palette_at(index: int) -> np.ndarray:
-        """The index-th distinct hue, spaced by the golden angle."""
+        One hue per merged map, golden-angle apart so any number of maps stays distinct.
+        """
         import colorsys
-        return np.array([int(255 * v) for v in
-                         colorsys.hsv_to_rgb((index * 0.6180339887) % 1.0, 0.9, 1.0)],
-                        dtype=np.uint8)
+        palette = np.array([[int(255 * v) for v in
+                             colorsys.hsv_to_rgb((i * 0.6180339887) % 1.0, 0.9, 1.0)]
+                            for i in range(max(len(self.maps), 1))], dtype=np.uint8)
+        return palette[self.source]
 
     def load(self, maps: Dict[str, Map]) -> bool:
         """Restore a site an earlier run wrote; False if there is nothing on disk."""
@@ -275,24 +284,3 @@ class Site:
                            "map_ids": [m.meta.name for m in self.maps]}}]}
 
 
-def _cell_keys(points: np.ndarray, voxel_size: float) -> np.ndarray:
-    """One int64 per point naming its ``voxel_size`` grid cell.
-
-    The packing is fixed, not fitted to the input's extent, so keys from different
-    merges compare directly.
-    """
-    cells = np.floor(np.asarray(points, dtype=float) / voxel_size).astype(np.int64) + _KEY_OFFSET
-    if len(cells) and (cells.min() < 0 or cells.max() >= 2 * _KEY_OFFSET):
-        raise OverflowError("site wider than the cell keys cover; raise the voxel size")
-    return (cells[:, 0] << 42) | (cells[:, 1] << 21) | cells[:, 2]
-
-
-def _best_per_cell(keys: np.ndarray, conf: np.ndarray) -> np.ndarray:
-    """Index of each cell's most confident point, in ascending cell order.
-
-    The sort is stable, so on a tie the earlier point wins.
-    """
-    order = np.lexsort((-np.asarray(conf, dtype=float), keys))
-    first = np.ones(len(order), dtype=bool)
-    first[1:] = keys[order[1:]] != keys[order[:-1]]
-    return order[first]
