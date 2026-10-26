@@ -79,12 +79,16 @@ def build_viewer(server):
         scenes = server.map_scenes(map_id) if map_id else {}
         return scenes.get("scene"), scenes.get("confidence"), _map_status(server, map_id)
 
-    def show_site(view):
-        """The chosen view's GLB; the prompt belongs to the Segmentation view alone."""
-        return (server.site_scenes().get(SITE_VIEWS[view]),
-                gr.update(visible=view == "Segmentation"))
+    def show_site(view, stage):
+        """The chosen view's GLB at the chosen stage; Segmentation has its prompt, no stages."""
+        seg = view == "Segmentation"
+        if seg or not stage:
+            path = server.site_scenes().get(SITE_VIEWS[view])
+        else:
+            path = server.site_stage(stage, SITE_VIEWS[view])
+        return path, gr.update(visible=seg), gr.update(visible=not seg)
 
-    def tick(current, listed):
+    def tick(current, listed, stage, staged):
         """Poll the worker for the map list, the open batch, and the site's summary.
 
         A batch that fills on its own is mapped by the worker thread, with no click to
@@ -94,11 +98,15 @@ def build_viewer(server):
         """
         ids = server.list_map_ids()
         keep = current if current in ids else (ids[0] if ids else None)
+        stages = server.site_stages()
+        at = stage if stage in [k for _, k in stages] else (stages[-1][1] if stages else None)
         status = server.batch_status()
         return (gr.skip() if ids == listed else gr.update(choices=ids, value=keep),
                 _site_status(server), _batch_status(status), status["latest"], ids,
                 gr.update(visible=status["processing"],
-                          value=_busy_html("Processing the batch…", status["log"])))
+                          value=_busy_html("Processing the batch…", status["log"])),
+                gr.skip() if stages == staged else gr.update(choices=stages, value=at),
+                stages)
 
     def do_clear():
         result = server.clear_batch()
@@ -189,25 +197,33 @@ def build_viewer(server):
                         seg_clear = gr.Button("Clear", variant="stop", size="sm",
                                               scale=0, min_width=80)
                 seg_msg = gr.Markdown()
+            with gr.Row():
+                site_stage = gr.Dropdown(choices=[], show_label=False, container=False,
+                                         scale=0, min_width=220)
             site_model = gr.Model3D(label="Site", height=560)
 
         listed = gr.State([])       # map ids the dropdown already offers
+        staged = gr.State([])
         on = lambda note: (lambda *_: gr.update(visible=True, value=_busy_html(note)))
         off = lambda: gr.update(visible=False)
 
-        poll = [map_dd, site_status, frame_status, latest, listed, mapping]
+        poll = [map_dd, site_status, frame_status, latest, listed, mapping, site_stage, staged]
+        polled = [map_dd, listed, site_stage, staged]
         map_views = [map_scene, map_conf, map_status]      # what show_map fills
-        demo.load(tick, inputs=[map_dd, listed], outputs=poll)
+        demo.load(tick, inputs=polled, outputs=poll)
         demo.load(show_map, inputs=[map_dd], outputs=map_views)
         # a reloaded page shows the filter as the server has it, not the default
         demo.load(lambda: server.batch_status()["keyframe_filter"], outputs=[kf_filter])
-        gr.Timer(3.0).tick(tick, inputs=[map_dd, listed], outputs=poll)
+        gr.Timer(3.0).tick(tick, inputs=polled, outputs=poll)
 
         # 3D views load with their tab, so they are never handed a value while hidden
         map_tab.select(show_map, inputs=[map_dd], outputs=map_views)
-        site_views = [site_model, seg_panel]      # what show_site fills
-        site_tab.select(show_site, inputs=[site_view], outputs=site_views)
-        site_view.change(show_site, inputs=[site_view], outputs=site_views)
+        site_shown = [site_view, site_stage]
+        site_views = [site_model, seg_panel, site_stage]      # what show_site fills
+        site_tab.select(show_site, inputs=site_shown, outputs=site_views)
+        site_view.change(show_site, inputs=site_shown, outputs=site_views)
+        site_stage.input(on("Rendering the site at that stage…"), outputs=[busy]).then(
+            show_site, inputs=site_shown, outputs=site_views).then(off, outputs=[busy])
         map_dd.change(show_map, inputs=[map_dd], outputs=map_views)
 
         # every action greys the viewport until it returns

@@ -21,7 +21,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from swiftmap import constants
 from swiftmap.server.transport import protocol
@@ -178,9 +178,20 @@ class AutoMappingServer:
     def site_scenes(self) -> Dict[str, Optional[str]]:
         """The site's GLBs, as paths a viewer can load."""
         site = self.db.get_site()
-        return {name: self._existing(site.path, filename) for name, filename in
-                (("scene", "site.glb"), ("confidence", "site_confidence.glb"),
-                 ("merged", "merged_res.glb"), ("seg", "seg_site.glb"))}
+        scenes = {view: site.stage_scene(len(site.maps), view)
+                  for view in ("scene", "confidence", "merged")}
+        scenes["seg"] = self._existing(site.path, "seg_site.glb")
+        return scenes
+
+    def site_stages(self) -> List[Tuple[str, int]]:
+        """(label, stage) for each stage of the site on disk, labelled by its map's time."""
+        site = self.db.get_site()
+        return [(datetime.strptime(m.meta.name[4:19], "%Y%m%d_%H%M%S").strftime("%b %d · %H:%M:%S"), k)
+                for k, m in enumerate(site.maps, 1) if site.stage_scene(k, "scene")]
+
+    def site_stage(self, upto: int, view: str) -> Optional[str]:
+        """One site view's GLB after the site's first ``upto`` maps."""
+        return self.db.get_site().stage_scene(upto, view)
 
     def segment_site(self, query: str) -> Dict[str, Any]:
         """Lift one text query into the site; targets accumulate across queries.

@@ -32,6 +32,15 @@ _ENU_TO_YUP = np.array([[-1.0, 0.0, 0.0],
                         [0.0, 0.0, 1.0],
                         [0.0, 1.0, 0.0]])
 
+_FIELDS = ("keys", "points", "colors", "conf", "source")
+_VIEWS = ("scene", "confidence", "merged")
+_LABEL_HEIGHT = 2.0
+_DIGITS = {"0": ("111", "101", "101", "101", "111"), "1": ("010", "110", "010", "010", "111"),
+           "2": ("111", "001", "111", "100", "111"), "3": ("111", "001", "111", "001", "111"),
+           "4": ("101", "101", "111", "001", "001"), "5": ("111", "100", "111", "001", "111"),
+           "6": ("111", "100", "111", "101", "111"), "7": ("111", "001", "001", "001", "001"),
+           "8": ("111", "101", "111", "101", "111"), "9": ("111", "101", "111", "001", "111")}
+
 
 class Site:
     """Every aligned Map merged into one cloud, in ENU metres about a shared origin."""
@@ -52,6 +61,12 @@ class Site:
         return (f"Site(maps={len(self.maps)}, "
                 f"points={0 if self.points is None else len(self.points)})")
 
+    # -------------------------------- helper --------------------------------
+    def _stage_dir(self, upto: int) -> str:
+        """Where the site after its first ``upto`` maps is stored."""
+        return os.path.join(self.path, "stages", str(upto))
+
+    # -------------------------------- grow and shrink --------------------------------
     def grow(self, new_map: Map,
              conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD) -> bool:
         """Merge one georeferenced Map in; False if it has nothing to contribute."""
@@ -108,7 +123,6 @@ class Site:
             raise OverflowError("site wider than the cell keys cover; raise the voxel size")
         return (cells[:, 0] << 42) | (cells[:, 1] << 21) | cells[:, 2]
 
-
     def _best_per_cell(self, keys: np.ndarray, conf: np.ndarray) -> np.ndarray:
         """Return the index of each cell's most confident point, in ascending cell order."""
         order = np.lexsort((-np.asarray(conf, dtype=float), keys))
@@ -117,78 +131,30 @@ class Site:
         return order[first]
 
     def drop(self, dropped: Map) -> bool:
-        """Remove one map's contribution and re-index the rest"""
+        """Remove one map's points, re-index the rest, and delete the stages that held it."""
         if dropped not in self.maps:
             return False
 
         index = self.maps.index(dropped)
-        keep = self.source != index                # a filter keeps the cell order
-        self.keys, self.points = self.keys[keep], self.points[keep]
-        self.colors, self.conf, self.source = self.colors[keep], self.conf[keep], self.source[keep]
-        self.source[self.source > index] -= 1      # close the gap the removal leaves
+        keep = self.source != index
+        for name in _FIELDS:
+            setattr(self, name, getattr(self, name)[keep])
+        self.source[self.source > index] -= 1
+        for stage in range(index + 1, len(self.maps) + 1):
+            shutil.rmtree(self._stage_dir(stage), ignore_errors=True)
         self.maps.pop(index)
         self.segments = []      # segments carry no source, so the dropped map's would linger
         print(f"[site] dropped {dropped.meta.name}: {len(self.maps)} maps, "
               f"{len(self.points)} points")
         return True
 
-    def write2disk(self):
-        """Export the merged cloud twice -- true colour, and coloured by source map."""
-        if self.points is None or not len(self.points):
-            shutil.rmtree(self.path, ignore_errors=True)   # nothing left; drop stale files
-            return
-        os.makedirs(self.path, exist_ok=True)
+    # -------------------------------- stages --------------------------------
+    def stage_scene(self, upto: int, view: str) -> Optional[str]:
+        """Path to the ``view`` GLB of the site after its first ``upto`` maps."""
+        path = os.path.join(self._stage_dir(upto), f"{view}.glb")
+        return path if os.path.isfile(path) else None
 
-        vertices = self.points @ _ENU_TO_YUP.T
-        scene = trimesh.Scene()
-        scene.add_geometry(trimesh.PointCloud(vertices=vertices, colors=self.colors),
-                           geom_name="site")
-        scene.export(os.path.join(self.path, "site.glb"))
-
-        by_map = trimesh.Scene()
-        by_map.add_geometry(trimesh.PointCloud(vertices=vertices, colors=self.map_colors()),
-                            geom_name="merged")
-        by_map.export(os.path.join(self.path, "merged_res.glb"))
-
-        by_conf = trimesh.Scene()
-        by_conf.add_geometry(trimesh.PointCloud(vertices=vertices, colors=self.conf_colors()),
-                             geom_name="confidence")
-        by_conf.export(os.path.join(self.path, "site_confidence.glb"))
-
-        with open(os.path.join(self.path, "site.geojson"), "w") as f:
-            json.dump(self.to_geojson(), f, indent=2)
-
-        seg_glb = os.path.join(self.path, "seg_site.glb")
-        if not self.segments and os.path.isfile(seg_glb):
-            os.remove(seg_glb)          # nothing left to show; drop the stale scene
-        if self.segments:
-            by_seg = trimesh.Scene()
-            background = (self.colors * _BACKGROUND_DIM).astype(np.uint8)
-            by_seg.add_geometry(trimesh.PointCloud(vertices=vertices, colors=background),
-                                geom_name="site")
-            for target in self.segments:
-                for n, inst in enumerate(target.instances):
-                    shade = (target.color * (1.0 - 0.25 * (n % 3))).astype(np.uint8)
-                    by_seg.add_geometry(
-                        trimesh.PointCloud(vertices=inst.points @ _ENU_TO_YUP.T,
-                                           colors=np.tile(shade, (len(inst.points), 1))),
-                        geom_name=f"{target.query}/{n}")
-            by_seg.export(seg_glb)
-
-        np.savez_compressed(os.path.join(self.path, "site_points.npz"),
-                            conf=self.conf.astype(np.float32), source=self.source,
-                            keys=self.keys)
-        owned = [(t, inst) for t, target in enumerate(self.segments) for inst in target.instances]
-        np.savez_compressed(os.path.join(self.path, "site_segments.npz"),
-                            queries=np.array([t.query for t in self.segments], dtype=object),
-                            colors=np.array([t.color for t in self.segments]).reshape(-1, 3),
-                            owner=np.array([t for t, _ in owned], dtype=np.int64),
-                            support=np.array([i.support for _, i in owned], dtype=np.int64),
-                            score=np.array([i.score for _, i in owned], dtype=float),
-                            counts=np.array([len(i.points) for _, i in owned], dtype=np.int64),
-                            points=(np.vstack([i.points for _, i in owned])
-                                    if owned else np.zeros((0, 3))))
-
+    # -------------------------------- segmentation --------------------------------
     def add_segmentation(self, query: str,
                          instances: List[SegmentedInstance]) -> SegmentedTarget:
         """Store one query's instances under a hue no earlier target used; a repeat replaces it."""
@@ -207,17 +173,90 @@ class Site:
         self.segments = []
         return count
 
-    def conf_colors(self) -> np.ndarray:
+    # -------------------------------- persistence --------------------------------
+    def write2disk(self):
+        """Save the site as its latest stage, with the files every stage shares."""
+        if self.points is None or not len(self.points):
+            shutil.rmtree(self.path, ignore_errors=True)   # nothing left; drop stale files
+            return
+        stage = self._stage_dir(len(self.maps))
+        os.makedirs(stage, exist_ok=True)
+
+        fields = {name: getattr(self, name) for name in _FIELDS}
+        for view in _VIEWS:
+            self._export_cloud(os.path.join(stage, f"{view}.glb"), self.points,
+                               self._view_colors(view, fields), view)
+        np.savez_compressed(os.path.join(stage, "site.npz"), **fields)
+
+        with open(os.path.join(self.path, "site.geojson"), "w") as f:
+            json.dump(self.to_geojson(), f, indent=2)
+
+        seg_glb = os.path.join(self.path, "seg_site.glb")
+        if not self.segments and os.path.isfile(seg_glb):
+            os.remove(seg_glb)          # nothing left to show; drop the stale scene
+        if self.segments:
+            by_seg = trimesh.Scene()
+            background = (self.colors * _BACKGROUND_DIM).astype(np.uint8)
+            by_seg.add_geometry(trimesh.PointCloud(vertices=self.points @ _ENU_TO_YUP.T,
+                                                   colors=background),
+                                geom_name="site")
+            for target in self.segments:
+                for n, inst in enumerate(target.instances):
+                    shade = (target.color * (1.0 - 0.25 * (n % 3))).astype(np.uint8)
+                    by_seg.add_geometry(
+                        trimesh.PointCloud(vertices=inst.points @ _ENU_TO_YUP.T,
+                                           colors=np.tile(shade, (len(inst.points), 1))),
+                        geom_name=f"{target.query}/{n}")
+                    above = np.append(inst.centroid[:2], inst.points[:, 2].max() + _LABEL_HEIGHT)
+                    label = self._label_points(str(n), above)
+                    by_seg.add_geometry(
+                        trimesh.PointCloud(vertices=label @ _ENU_TO_YUP.T,
+                                           colors=np.tile(shade, (len(label), 1))),
+                        geom_name=f"{target.query}/{n}/label")
+            by_seg.export(seg_glb)
+
+        owned = [(t, inst) for t, target in enumerate(self.segments) for inst in target.instances]
+        np.savez_compressed(os.path.join(self.path, "site_segments.npz"),
+                            queries=np.array([t.query for t in self.segments], dtype=object),
+                            colors=np.array([t.color for t in self.segments]).reshape(-1, 3),
+                            owner=np.array([t for t, _ in owned], dtype=np.int64),
+                            support=np.array([i.support for _, i in owned], dtype=np.int64),
+                            score=np.array([i.score for _, i in owned], dtype=float),
+                            counts=np.array([len(i.points) for _, i in owned], dtype=np.int64),
+                            points=(np.vstack([i.points for _, i in owned])
+                                    if owned else np.zeros((0, 3))))
+
+    @staticmethod
+    def _label_points(text: str, at: np.ndarray) -> np.ndarray:
+        """``text`` as solid dots in a 3x5 font, lying flat and centred on ``at``, north up."""
+        cell = _LABEL_HEIGHT / 5
+        fill = np.stack(np.meshgrid(np.linspace(0, 0.9, 6), np.linspace(0, 0.9, 6)), -1).reshape(-1, 2)
+        pixels = np.array([(4 * c + x, 4 - y) for c, char in enumerate(text)
+                           for y, row in enumerate(_DIGITS[char])
+                           for x, bit in enumerate(row) if bit == "1"], dtype=float)
+        xy = (pixels[:, None, :] + fill[None]).reshape(-1, 2) * cell
+        xy -= [(4 * len(text) - 1) * cell / 2, 2.5 * cell]
+        return np.column_stack([xy + at[:2], np.full(len(xy), at[2])])
+
+    def _view_colors(self, view: str, fields: Dict[str, np.ndarray]) -> np.ndarray:
+        """Per-point colours of ``view``: true colour, confidence, or source map."""
+        if view == "confidence":
+            return self.conf_colors(fields["conf"])
+        if view == "merged":
+            return self.map_colors(fields["source"])
+        return fields["colors"]
+
+    def conf_colors(self, conf: np.ndarray) -> np.ndarray:
         """Per-point RGBA over a fixed confidence range: red (low) to green (high)."""
         lo, hi = _CONF_RANGE
-        norm = np.clip((self.conf - lo) / (hi - lo), 0.0, 1.0)
+        norm = np.clip((conf - lo) / (hi - lo), 0.0, 1.0)
         colors = np.zeros((len(norm), 4), dtype=np.uint8)
         colors[:, 0] = ((1.0 - norm) * 255).astype(np.uint8)
         colors[:, 1] = (norm * 255).astype(np.uint8)
         colors[:, 3] = 255
         return colors
 
-    def map_colors(self) -> np.ndarray:
+    def map_colors(self, source: np.ndarray) -> np.ndarray:
         """Per-point RGB naming which map each point came from.
 
         One hue per merged map, golden-angle apart so any number of maps stays distinct.
@@ -226,31 +265,51 @@ class Site:
         palette = np.array([[int(255 * v) for v in
                              colorsys.hsv_to_rgb((i * 0.6180339887) % 1.0, 0.9, 1.0)]
                             for i in range(max(len(self.maps), 1))], dtype=np.uint8)
-        return palette[self.source]
+        return palette[source]
+
+    @staticmethod
+    def _export_cloud(path: str, points: np.ndarray, colors: np.ndarray, name: str):
+        """Write one coloured point cloud as a Y-up GLB."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        scene = trimesh.Scene()
+        scene.add_geometry(trimesh.PointCloud(vertices=points @ _ENU_TO_YUP.T, colors=colors),
+                           geom_name=name)
+        scene.export(path)
+
+    def to_geojson(self) -> dict:
+        """site.geojson: where the site's local (0, 0, 0) sits on Earth."""
+        return {"type": "FeatureCollection", "features": [{
+            "type": "Feature",
+            "geometry": {"type": "Point",
+                         "coordinates": [self.origin.longitude, self.origin.latitude,
+                                         self.origin.altitude or 0.0]},
+            "properties": {"layer": "site_origin",
+                           "model": f"stages/{len(self.maps)}/scene.glb",
+                           "description": "model local (0,0,0); the first merged map's origin",
+                           "altitude_mode": "absolute",
+                           "num_maps": len(self.maps),
+                           "num_points": len(self.points),
+                           "mean_confidence": float(self.conf.mean()),
+                           "median_confidence": float(np.median(self.conf)),
+                           "map_ids": [m.meta.name for m in self.maps]}}]}
 
     def load(self, maps: Dict[str, Map]) -> bool:
         """Restore a site an earlier run wrote; False if there is nothing on disk."""
         meta = os.path.join(self.path, "site.geojson")
-        cloud = os.path.join(self.path, "site.glb")
-        if not all(os.path.isfile(f) for f in
-                   (meta, cloud, os.path.join(self.path, "site_points.npz"))):
+        if not os.path.isfile(meta):
             return False
-
         with open(meta) as f:
             feature = json.load(f)["features"][0]
+        map_ids = feature["properties"].get("map_ids", [])
+        if not os.path.isfile(os.path.join(self._stage_dir(len(map_ids)), "site.npz")):
+            return False
+
         lon, lat, alt = feature["geometry"]["coordinates"]
         self.origin = GPS(lat, lon, alt)
-        self.maps = [maps[i] for i in feature["properties"].get("map_ids", []) if i in maps]
-
-        geometry = list(trimesh.load(cloud).geometry.values())[0]
-        arrays = np.load(os.path.join(self.path, "site_points.npz"))
-        # the keys are stored, not re-derived: the GLB holds float32, and rounding can
-        # carry a point across a cell boundary
-        self.keys = arrays["keys"]
-        self.points = np.asarray(geometry.vertices) @ np.linalg.inv(_ENU_TO_YUP).T
-        self.colors = np.array(geometry.colors)[:, :3]
-        self.conf = arrays["conf"].astype(float)
-        self.source = arrays["source"]
+        self.maps = [maps[i] for i in map_ids if i in maps]
+        arrays = np.load(os.path.join(self._stage_dir(len(map_ids)), "site.npz"))
+        for name in _FIELDS:
+            setattr(self, name, np.array(arrays[name]))
         self._load_segments()
         print(f"[site] loaded {len(self.points)} points from {len(self.maps)} maps, "
               f"{len(self.segments)} segmented target(s)")
@@ -269,22 +328,3 @@ class Site:
                                                  arrays["score"], chunks):
             self.segments[owner].instances.append(
                 SegmentedInstance(points, int(support), float(score)))
-
-    def to_geojson(self) -> dict:
-        """site.geojson: where site.glb's local (0, 0, 0) sits on Earth."""
-        return {"type": "FeatureCollection", "features": [{
-            "type": "Feature",
-            "geometry": {"type": "Point",
-                         "coordinates": [self.origin.longitude, self.origin.latitude,
-                                         self.origin.altitude or 0.0]},
-            "properties": {"layer": "site_origin",
-                           "model": "site.glb",
-                           "description": "model local (0,0,0); the first merged map's origin",
-                           "altitude_mode": "absolute",
-                           "num_maps": len(self.maps),
-                           "num_points": len(self.points),
-                           "mean_confidence": float(self.conf.mean()),
-                           "median_confidence": float(np.median(self.conf)),
-                           "map_ids": [m.meta.name for m in self.maps]}}]}
-
-
