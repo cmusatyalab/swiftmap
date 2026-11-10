@@ -163,7 +163,7 @@ def build_viewer(server):
             with gr.Row():
                 clear_btn = gr.Button("Clear batch", scale=0, min_width=140)
                 render_btn = gr.Button("Render now", variant="primary", scale=0, min_width=140)
-                kf_filter = gr.Checkbox(value=True, label="Keyframe filter enable",
+                kf_filter = gr.Checkbox(value=False, label="Keyframe filter enable",
                                         info="Off keeps every frame", scale=0, min_width=220)
             frame_msg = gr.Markdown()
             latest = gr.Image(label="Latest keyframe", height=420, interactive=False)

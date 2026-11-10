@@ -77,7 +77,7 @@ class AutoMappingServer:
         # run state
         self.is_running = False
         self.processing = False        # the worker is mid-pipeline on a batch
-        self.keyframe_filter = True    # select keyframes; off keeps every frame
+        self.keyframe_filter = False
         self.log: Deque[str] = deque(maxlen=200)
         sys.stdout = _LogTail(sys.stdout, self.log)
         self.transport_thread = None
