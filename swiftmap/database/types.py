@@ -237,12 +237,16 @@ class FlightPlan:
         pins = "\n".join(
             f"    <Placemark>\n"
             f"      <name>v{i}</name>\n"
+            f"      <LookAt><longitude>{vp.target_gps.longitude:.9f}</longitude>"
+            f"<latitude>{vp.target_gps.latitude:.9f}</latitude>"
+            f"<altitude>{vp.target_gps.altitude or 0:.3f}</altitude>"
+            f"<altitudeMode>absolute</altitudeMode></LookAt>\n"
             f"      <styleUrl>#icon-1899-0288D1-nodesc</styleUrl>\n"
             f"      <Point><altitudeMode>absolute</altitudeMode>"
             f"<coordinates>{wp.longitude:.9f},{wp.latitude:.9f},"
             f"{wp.altitude or 0:.3f}</coordinates></Point>\n"
             f"    </Placemark>"
-            for i, wp in enumerate(self.waypoints))
+            for i, (wp, vp) in enumerate(zip(self.waypoints, self.viewpoints)))
 
         return ('<?xml version="1.0" encoding="UTF-8"?>\n'
                 '<kml xmlns="http://www.opengis.net/kml/2.2">\n'

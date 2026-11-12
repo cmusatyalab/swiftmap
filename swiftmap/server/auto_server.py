@@ -78,6 +78,7 @@ class AutoMappingServer:
         self.is_running = False
         self.processing = False        # the worker is mid-pipeline on a batch
         self.keyframe_filter = False
+        self.focus = ""
         self.log: Deque[str] = deque(maxlen=200)
         sys.stdout = _LogTail(sys.stdout, self.log)
         self.transport_thread = None
@@ -147,7 +148,7 @@ class AutoMappingServer:
 
             self.processing = True
             try:
-                result = self.session.process(map_id)
+                result = self.session.process(map_id, focus=self.focus)
                 if "error" in result:
                     print(f"[swiftmap-server] {result['error']}")
                     continue
@@ -156,7 +157,8 @@ class AutoMappingServer:
                 if self.db.grow_site(map_id):
                     self.db.get_site().write2disk()
 
-                plan_kml = self.db.get_map(map_id).get_flight_plan().to_kml()
+                plan = self.db.get_map(map_id).get_flight_plan()
+                plan_kml = plan and plan.to_kml()
                 if plan_kml:
                     self.send_to_client(plan_kml.encode())
             finally:
@@ -246,6 +248,11 @@ class AutoMappingServer:
         if self.transporter:
             self.transporter.set_keyframe_filter(self.keyframe_filter)
         return {"success": True, "enabled": self.keyframe_filter}
+
+    def set_focus(self, focus: str) -> Dict[str, Any]:
+        """Plan only over the weak regions of what matches ``focus``; empty plans over all."""
+        self.focus = (focus or "").strip()
+        return {"success": True, "focus": self.focus}
 
     def del_map(self, map_id: str) -> Dict[str, Any]:
         """Delete a stored map, and drop what it contributed to the site."""

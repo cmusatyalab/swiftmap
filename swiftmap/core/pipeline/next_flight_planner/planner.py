@@ -74,6 +74,8 @@ class NextFlightPlanner:
 
         wp, conf = pt.flatten_points(), pt.flatten_conf()
         valid = np.isfinite(wp).all(1) & np.isfinite(conf)
+        if params.get("mask") is not None:
+            valid &= params["mask"].reshape(-1)
         wp, conf = wp[valid], conf[valid]
         if len(wp) == 0:
             return self._empty("No valid points", params)

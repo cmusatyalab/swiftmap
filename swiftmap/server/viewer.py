@@ -123,6 +123,11 @@ def build_viewer(server):
         return ("Keyframe filter **on**: only frames that add enough motion are kept."
                 if enabled else "Keyframe filter **off**: every frame that arrives is kept.")
 
+    def do_focus(focus):
+        focus = server.set_focus(focus)["focus"]
+        return (f"Focus **{focus}**: the next flight covers only its weak regions."
+                if focus else "No focus: the next flight covers every weak region.")
+
     def do_clear_seg():
         """Throw away every target, leaving the Segmentation view empty."""
         result = server.clear_segmentations()
@@ -165,6 +170,8 @@ def build_viewer(server):
                 render_btn = gr.Button("Render now", variant="primary", scale=0, min_width=140)
                 kf_filter = gr.Checkbox(value=False, label="Keyframe filter enable",
                                         info="Off keeps every frame", scale=0, min_width=220)
+                focus_box = gr.Textbox(label="Focus", placeholder="e.g. building; empty for all",
+                                       info="Plan only over the weak regions of this", scale=1)
             frame_msg = gr.Markdown()
             latest = gr.Image(label="Latest keyframe", height=420, interactive=False)
 
@@ -234,6 +241,8 @@ def build_viewer(server):
         # only flips a flag, so no scrim; always_last, so the server ends on the last click
         kf_filter.input(do_filter, inputs=[kf_filter], outputs=[frame_msg],
                         trigger_mode="always_last")
+        for start in (focus_box.submit, focus_box.blur):
+            start(do_focus, inputs=[focus_box], outputs=[frame_msg])
         map_refresh.click(on("Loading the map…"), outputs=[busy]).then(
             show_map, inputs=[map_dd], outputs=map_views).then(off, outputs=[busy])
         map_del.click(on("Deleting the map…"), outputs=[busy]).then(

@@ -110,6 +110,22 @@ class BaseSegmenter(ABC):
             images = (np.clip(images, 0.0, 1.0) * 255).astype(np.uint8)
         return [np.ascontiguousarray(img) for img in images]
 
+    def masks(self, map_, query: str) -> Optional[np.ndarray]:
+        """``(S, H, W)`` masks of ``query`` over one map's frames, each the union of its
+        instances; None if the map has no frames or the model can't initialize."""
+        pt = map_.get_pointcloud()
+        if pt is None or pt.images is None:
+            return None
+        images = self._reshape_images(pt.images)
+        frames = self._segment(images, query)
+        if frames is None:
+            return None
+        masks = np.zeros((len(images), *images[0].shape[:2]), dtype=bool)
+        for mask, found in zip(masks, frames):
+            for m, _ in found:
+                mask |= m
+        return masks
+
     def _segment(self, images_rgb: List[np.ndarray], query: str) -> Optional[List[Instances]]:
         """Segment a list of RGB uint8 frames; per frame, the instances found.
 
