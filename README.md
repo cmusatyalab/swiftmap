@@ -226,7 +226,7 @@ saying what is running; while a batch is being mapped, the live server log shows
 - **Frames** — how full the open batch is, and the latest keyframe. *Clear batch* discards the
   collected frames; *Render now* closes a partial batch and maps it immediately; the
   *keyframe filter* toggle keeps every frame instead of only those with enough motion. *NFN mode*
-  (off by default) plans after each batch, fetches *Reachback images* (default 10) for its weak
+  (on by default) plans after each batch, fetches *Reachback images* (default 10) for its weak
   targets, and maps the old images again with them, for *NFN rounds* rounds (default 1),
   ignoring new frames meanwhile; off, batches are mapped without planning.
 - **Maps** — every stored map, newest first, with its reconstruction and confidence cloud in local

@@ -179,7 +179,7 @@ def build_viewer(server):
                 render_btn = gr.Button("Render now", variant="primary", scale=0, min_width=140)
                 kf_filter = gr.Checkbox(value=False, label="Keyframe filter enable",
                                         info="Off keeps every frame", scale=0, min_width=220)
-                nfn_mode = gr.Checkbox(value=False, label="NFN mode",
+                nfn_mode = gr.Checkbox(value=server.nfn_mode, label="NFN mode",
                                        info="Plan, reach back, map again", scale=0, min_width=200)
                 rounds = gr.Number(value=server.nfn_rounds, label="NFN rounds",
                                    precision=0, minimum=1, scale=0, min_width=140)

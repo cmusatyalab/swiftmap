@@ -78,7 +78,7 @@ class AutoMappingServer:
         self.is_running = False
         self.processing = False        # the worker is mid-pipeline on a batch
         self.keyframe_filter = False
-        self.nfn_mode = False
+        self.nfn_mode = True
         self.nfn_rounds = constants.NFN_ROUNDS
         self.reachback_count = constants.NFN_REACHBACK_COUNT
         self.log: Deque[str] = deque(maxlen=200)
