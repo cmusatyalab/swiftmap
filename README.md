@@ -61,12 +61,19 @@ fix. The server runs every batch through this pipeline:
    VGGT-Omega, the default) predicts camera poses and a per-pixel point map.
 4. **GPS alignment** — a closed-form Umeyama fit maps the camera trajectory onto the GPS track,
    giving the map a **Georeference** into ENU metres.
-5. **Next Flight Navigation** — points in the 60th–80th confidence-percentile band are tiled into
-   5 m ground cells; each well-populated cell yields a viewpoint at a 15 m stand-off and 35° tilt.
-   Each pin of the KML carries its target in a `<LookAt>`, and the plan rides back to the
-   client on the next TCP reply.
-6. **Site merge** — the map joins the **Site** in a shared ENU frame (about the first map's
+5. **Site merge** — the map joins the **Site** in a shared ENU frame (about the first map's
    origin), on a 0.1 m voxel grid where each voxel keeps the highest confidence observed.
+6. **Next Flight Navigation** (NFN mode only) — points in the 60th–80th confidence-percentile
+   band are tiled into 5 m ground cells; each well-populated cell yields a viewpoint at a 15 m
+   stand-off and 35° tilt. Each pin of the KML carries its target in a `<LookAt>`, and the KML
+   the number of frames already taken to send back for them; the plan rides back to the client
+   on the next TCP reply. The server waits for those frames (marked as sent back on the wire,
+   then a done marker; `NFN_REACHBACK_TIMEOUT_S`, default 120 s, at most), maps the batch's
+   keyframes and them as a new Map, and merges it into the site. New keyframes keep collecting
+   into the next batch meanwhile.
+
+Each frame on the wire ends with a kind byte: a new frame, a frame sent back for the last plan,
+or, with no image, the marker that all of those are in (`swiftmap/server/transport/protocol.py`).
 
 **Segmentation** is on demand: a query from the viewer runs
 [SAM 3](https://github.com/facebookresearch/sam3) on every frame of every map, indexes the
@@ -182,6 +189,8 @@ empty `SWIFTMAP_BACKBONE` resolves to no backbone at all.
 | `SAM3_BPE_PATH` | *unset → bundled with `sam3`* | SAM 3 tokenizer vocab |
 | `SAM3_CONF_THRESHOLD` | `0.5` | minimum SAM 3 instance confidence |
 | `NFN_MAX_VIEWPOINTS` | `10` | cap on suggested viewpoints per plan |
+| `NFN_REACHBACK_COUNT` | `10` | NFN mode: frames already taken to send back per plan (also in the viewer) |
+| `NFN_REACHBACK_TIMEOUT_S` | `120` | NFN mode: longest wait for them before mapping again with what came |
 
 The `SWIFTMAP_*` server settings also exist as `launch_server.py` flags (`--host`, `--port`,
 `--backbone`, `--segmenter`, `--batch-size`, `--min-disparity`, `--output-dir`, `--viewer-port`,
@@ -208,7 +217,9 @@ saying what is running; while a batch is being mapped, the live server log shows
 
 - **Frames** — how full the open batch is, and the latest keyframe. *Clear batch* discards the
   collected frames; *Render now* closes a partial batch and maps it immediately; the
-  *keyframe filter* toggle keeps every frame instead of only those with enough motion.
+  *keyframe filter* toggle keeps every frame instead of only those with enough motion. *NFN mode*
+  (off by default) plans after each batch, fetches *Reachback images* (default 10) for its weak
+  targets, and maps the batch again with them; off, batches are mapped without planning.
 - **Maps** — every stored map, newest first, with its reconstruction and confidence cloud in local
   coordinates. *Delete map* removes it **and** its contribution to the site.
 - **Site** — the merged map, one view at a time:
