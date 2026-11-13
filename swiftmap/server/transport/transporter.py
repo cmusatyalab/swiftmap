@@ -19,10 +19,11 @@ import struct
 import threading
 import time
 import queue
+from collections import deque
 import cv2
 import numpy as np
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, Deque, List, Tuple
 
 from swiftmap import constants
 from swiftmap.server.transport import protocol
@@ -56,7 +57,7 @@ class Transporter:
         self.total_frames_received = 0
         self.total_keyframes_selected = 0
         self._outbound_lock = threading.Lock()
-        self._pending_payload = b""
+        self._outbound: Deque[bytes] = deque()
 
         # Statistics
         self.stats = {
@@ -159,7 +160,8 @@ class Transporter:
 
                 image, metadata = result
                 if metadata["kind"] != protocol.KIND_FRAME:
-                    self._add_reachback(image, metadata)
+                    if metadata["kind"] != protocol.KIND_POLL:
+                        self._add_reachback(image, metadata)
                     self.send_status_response(client_socket, "success")
                     continue
 
@@ -212,7 +214,7 @@ class Transporter:
                 return None
             gps = protocol.unpack_gps(gps_bytes)
             kind = struct.unpack(protocol.KIND_FORMAT, kind_bytes)[0]
-            if image is None and kind != protocol.KIND_REACHBACK_DONE:
+            if image is None and kind not in (protocol.KIND_REACHBACK_DONE, protocol.KIND_POLL):
                 print("Received a frame without an image")
                 return None
 
@@ -262,15 +264,28 @@ class Transporter:
             return False
 
     def queue_outbound(self, payload: bytes):
-        """Stash a payload to piggyback on the next per-frame reply (delivered once)."""
-        with self._outbound_lock:
-            self._pending_payload = payload or b""
+        """Queue a payload to piggyback on a reply; one goes out per reply, in order."""
+        if payload:
+            with self._outbound_lock:
+                self._outbound.append(payload)
 
     def _take_outbound(self) -> bytes:
-        """Pop the pending outbound payload (empty if none), clearing it."""
+        """Pop the next outbound payload (empty if none)."""
         with self._outbound_lock:
-            payload, self._pending_payload = self._pending_payload, b""
-        return payload
+            return self._outbound.popleft() if self._outbound else b""
+
+    def _hold(self):
+        """In NFN mode, ignore new frames from the batch that just closed until its rounds
+        are done, and tell the client to stop sending them."""
+        self.holding = self.nfn_mode
+        if self.holding:
+            self.queue_outbound(protocol.NFN_HOLD)
+
+    def release(self):
+        """Take new frames again after a hold, and tell the client."""
+        if self.holding:
+            self.holding = False
+            self.queue_outbound(protocol.NFN_RELEASE)
 
     # ===================================================== keyframe selection & batching
     def set_keyframe_filter(self, enabled: bool):
@@ -344,7 +359,7 @@ class Transporter:
                 return
             batch= self._batch
             self._batch = []
-            self.holding = self.nfn_mode
+        self._hold()
 
         map_id = self._close_batch(batch).meta.name
         self._batches.put(map_id)
@@ -434,7 +449,7 @@ class Transporter:
             if not self._batch:
                 return None
             batch, self._batch = self._batch, []
-            self.holding = self.nfn_mode
+        self._hold()
 
         map_id = self._close_batch(batch).meta.name
         self._batches.put(map_id)

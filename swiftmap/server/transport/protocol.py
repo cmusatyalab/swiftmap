@@ -13,8 +13,12 @@ Per frame, a client sends:
     [ 1-byte   uint8                  kind                  ]
 
 The kind is KIND_FRAME for a new frame, KIND_REACHBACK for an older frame sent back for
-the last NFN plan, and KIND_REACHBACK_DONE, with no image (size 0), once every frame sent
-back for it is in.
+the last NFN plan, and, with no image (size 0), KIND_REACHBACK_DONE once every frame sent
+back for it is in, or KIND_POLL to only fetch what the server has queued for the client.
+
+The reply payload is a next-flight KML, or one of the NFN notices: NFN_HOLD when a batch
+closes in NFN mode (stop sending new frames, only poll, until NFN_RELEASE once its rounds
+are done). Queued payloads go out one per reply, in order.
 
 The server replies:
 
@@ -50,6 +54,10 @@ KIND_NBYTES = struct.calcsize(KIND_FORMAT)    # 1
 KIND_FRAME = 0
 KIND_REACHBACK = 1
 KIND_REACHBACK_DONE = 2
+KIND_POLL = 3
+
+NFN_HOLD = b'{"nfn": "hold"}'
+NFN_RELEASE = b'{"nfn": "release"}'
 REPLY_NBYTES = struct.calcsize(REPLY_FORMAT)  # 24 (status header only)
 PAYLOAD_LEN_NBYTES = struct.calcsize(PAYLOAD_LEN_FORMAT)  # 4
 

@@ -162,7 +162,7 @@ class AutoMappingServer:
                     map_id = self.transporter.rebuild_map(map_id, frames)
                     planned = self._map(map_id, plan=done < rounds)
             finally:
-                self.transporter.holding = False
+                self.transporter.release()
                 self.processing = False
 
     def _map(self, map_id: str, plan: bool) -> bool:
@@ -283,7 +283,8 @@ class AutoMappingServer:
         self.nfn_mode = bool(enabled)
         if self.transporter:
             self.transporter.nfn_mode = self.nfn_mode
-            self.transporter.holding &= self.nfn_mode
+            if not self.nfn_mode:
+                self.transporter.release()
         return {"success": True, "enabled": self.nfn_mode}
 
     def set_nfn_rounds(self, rounds) -> Dict[str, Any]:

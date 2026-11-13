@@ -73,10 +73,14 @@ fix. The server runs every batch through this pipeline:
    *NFN rounds* above 1, the next round plans on the map the last one made, until the
    rounds are done or no frames come back. From when the batch closes until its rounds are
    done, new frames are ignored: only the frames sent back are taken, and every round maps the
-   old images again with them.
+   old images again with them. The server says so on the reply to the frame that closes the
+   batch (an NFN hold notice), so the client stops sending new frames and polls for its plans
+   until the release notice once the rounds are done.
 
 Each frame on the wire ends with a kind byte: a new frame, a frame sent back for the last plan,
-or, with no image, the marker that all of those are in (`swiftmap/server/transport/protocol.py`).
+or, with no image, the marker that all of those are in, or a poll for what the server has queued
+(`swiftmap/server/transport/protocol.py`). Queued payloads (plans, NFN notices) go out one per
+reply, in order.
 
 **Segmentation** is on demand: a query from the viewer runs
 [SAM 3](https://github.com/facebookresearch/sam3) on every frame of every map, indexes the
