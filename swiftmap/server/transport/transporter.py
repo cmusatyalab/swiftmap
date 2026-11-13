@@ -33,6 +33,18 @@ from swiftmap.database.map import Map
 from swiftmap.database.types import GPS
 
 
+def image_extension(data: bytes) -> Optional[str]:
+    """The file extension of the encoded image ``data``: .webp, .png or .jpg, or None
+    if it is none of them."""
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    return None
+
+
 class Transporter:
     """Receives drone frames over TCP, selects keyframes, and batches them into a Map for reconstruction."""
 
@@ -78,6 +90,7 @@ class Transporter:
         # new frames are ignored from when a batch closes until its rounds are done.
         self._reachback: List[Tuple[str, GPS]] = []
         self._reachback_done = threading.Event()
+        self._reachback_cutoff = False
         self.nfn_mode = False
         self.holding = False
 
@@ -221,6 +234,7 @@ class Transporter:
             metadata = {
                 "timestamp": datetime.now(),
                 "image_size": image_size,
+                "encoded": received_data if image_size else None,
                 "image_shape": None if image is None else image.shape,
                 "frame_id": self.total_frames_received + 1,
                 "gps": gps,
@@ -327,14 +341,22 @@ class Transporter:
 
     def _save_keyframe(self, image: np.ndarray, metadata: Dict[str, Any],
                        prefix: str = "keyframe") -> str:
-        """Save a keyframe to the scratch dir; returns its path, or "" on failure."""
+        """Save a keyframe to the scratch dir; returns its path, or "" on failure. The
+        image file it came in as is kept byte for byte, so nothing is lost to encoding
+        it again; an image that came some other way is saved as a JPEG."""
         try:
             timestamp_str = metadata["timestamp"].strftime("%Y%m%d_%H%M%S_%f")
             frame_id = metadata["frame_id"]
-            image_name = f"{prefix}_{frame_id:06d}_{timestamp_str}.jpg"
+            encoded = metadata.get("encoded")
+            ext = image_extension(encoded) if encoded else None
+            image_name = f"{prefix}_{frame_id:06d}_{timestamp_str}{ext or '.jpg'}"
             image_path = os.path.join(self.temp_dir, image_name)
 
-            cv2.imwrite(image_path, image)
+            if ext:
+                with open(image_path, "wb") as f:
+                    f.write(encoded)
+            else:
+                cv2.imwrite(image_path, image)
             print(f"Keyframe saved: {image_path}")
             return image_path
 
@@ -369,7 +391,7 @@ class Transporter:
         images, all_gps = [], []
         
         for idx, (img_path, gps) in enumerate(batch):
-            name = f"frame_{idx:06d}.jpg"
+            name = f"frame_{idx:06d}{os.path.splitext(img_path)[1] or '.jpg'}"
             try:
                 os.replace(img_path, os.path.join(map_.images_dir, name))
             except OSError as err:
@@ -395,7 +417,15 @@ class Transporter:
         """Forget any frames sent back so far, before a plan asks for more."""
         with self._batch_lock:
             self._reachback = []
-        self._reachback_done.clear()
+        if not self._reachback_cutoff:
+            self._reachback_done.clear()
+
+    def finish_reachback(self):
+        """Stop waiting for frames sent back: the current wait, and every later one,
+        returns at once with whatever came."""
+        self._reachback_cutoff = True
+        self._reachback_done.set()
+        print("[transport] reachback cut off; mapping with what came")
 
     def wait_reachback(self, timeout: float) -> List[Tuple[str, GPS]]:
         """The frames sent back for the last plan, once all are in or ``timeout`` passed."""
@@ -426,7 +456,8 @@ class Transporter:
         """How full the open batch is, and the newest keyframe in it."""
         with self._batch_lock:
             return {"collected": len(self._batch), "capacity": self.batch_size,
-                    "latest": self._batch[-1][0] if self._batch else None}
+                    "latest": self._batch[-1][0] if self._batch else None,
+                    "pending": self._batches.qsize()}
 
     def clear_batch(self) -> int:
         """Throw away the frames collected so far; returns how many were dropped."""

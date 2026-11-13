@@ -284,6 +284,14 @@ class AutoMappingServer:
             return {"error": "No frames collected yet."}
         return {"success": True, "map_id": map_id}
 
+    def finish_round(self) -> Dict[str, Any]:
+        """Map the NFN round with the frames sent back so far, without waiting for the rest;
+        later rounds don't wait either."""
+        if self.transporter is None:
+            return {"error": "The transport is not running."}
+        self.transporter.finish_reachback()
+        return {"success": True}
+
     def set_keyframe_filter(self, enabled: bool) -> Dict[str, Any]:
         """Select keyframes from the frames that follow, or keep every one of them."""
         self.keyframe_filter = bool(enabled)

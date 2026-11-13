@@ -18,6 +18,10 @@ by CLI flags:
     SWIFTMAP_MIN_DISPARITY   keyframe-selection px     (default 40)
     SWIFTMAP_OUTPUT_DIR      export dir (mount this)   (default output)
     SWIFTMAP_VIEWER_PORT     results viewer            (default 7866)
+    SWIFTMAP_CONTROL_PORT    control API on 127.0.0.1  (default 43323, 0 = off)
+
+The control API takes POST /render (map the open batch now), POST /finish (map the
+NFN round with the frames sent back so far) and GET /status, each answering JSON.
 
 Usage:
     uv run --env-file .env python launch_server.py
@@ -25,8 +29,11 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 repo_root = os.path.dirname(os.path.abspath(__file__))
 if repo_root not in sys.path:
@@ -41,6 +48,37 @@ from swiftmap.server.viewer import launch_viewer
 def _env(name: str, default):
     v = os.environ.get(name)
     return default if v is None or v == "" else v
+
+
+def launch_control(server, port: int) -> None:
+    """Serve the control API on 127.0.0.1:``port`` from a daemon thread."""
+    routes = {("POST", "/render"): server.render_now,
+              ("POST", "/finish"): server.finish_round,
+              ("GET", "/status"): server.batch_status}
+
+    class Handler(BaseHTTPRequestHandler):
+        def _answer(self, method):
+            call = routes.get((method, self.path))
+            code, body = (404, {"error": f"no {method} {self.path}"}) if call is None else (200, call())
+            data = json.dumps(body, default=str).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            self._answer("GET")
+
+        def do_POST(self):
+            self._answer("POST")
+
+        def log_message(self, fmt, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=httpd.serve_forever, name="control", daemon=True).start()
+    print(f"[swiftmap-server] control API on http://127.0.0.1:{port}")
 
 
 def main() -> int:
@@ -58,6 +96,8 @@ def main() -> int:
     p.add_argument("--output-dir", default=_env("SWIFTMAP_OUTPUT_DIR", "output"))
     p.add_argument("--viewer-port", type=int,
                    default=int(_env("SWIFTMAP_VIEWER_PORT", constants.GUI_PORT)))
+    p.add_argument("--control-port", type=int, default=int(_env("SWIFTMAP_CONTROL_PORT", 43323)),
+                   help="control API port on 127.0.0.1; 0 to not serve it")
     p.add_argument("--no-viewer", action="store_true", help="run headless, without the viewer")
     args = p.parse_args()
 
@@ -68,6 +108,8 @@ def main() -> int:
         output_dir=args.output_dir,
     )
     server = AutoMappingServer(cfg)
+    if args.control_port:
+        launch_control(server, args.control_port)
     if not args.no_viewer:
         # The viewer is a convenience; a failure here must not stop the mapping run.
         try:
