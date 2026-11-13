@@ -63,9 +63,8 @@ fix. The server runs every batch through this pipeline:
    giving the map a **Georeference** into ENU metres.
 5. **Next Flight Navigation** — points in the 60th–80th confidence-percentile band are tiled into
    5 m ground cells; each well-populated cell yields a viewpoint at a 15 m stand-off and 35° tilt.
-   With a focus set in the viewer (e.g. `building`), only the band points SAM 3 finds it in
-   are planned over. Each pin of the KML carries its target in a `<LookAt>`, and the plan
-   rides back to the client on the next TCP reply.
+   Each pin of the KML carries its target in a `<LookAt>`, and the plan rides back to the
+   client on the next TCP reply.
 6. **Site merge** — the map joins the **Site** in a shared ENU frame (about the first map's
    origin), on a 0.1 m voxel grid where each voxel keeps the highest confidence observed.
 
