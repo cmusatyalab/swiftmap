@@ -3,8 +3,10 @@
 """The ``Database``: the result dir, reached through the session.
 
     <root>/maps/   one dir per reconstructed batch (images, sky masks, GLB/PLY, NFN,
-                   transform.json, map.json)
-    <root>/site/   the ``Site`` -- same layout, grown by merging each stored map in
+                   transform.json, map.json); each NFN round mapped after it, in the
+                   same layout, under its rounds/<k>/
+    <root>/site/   the ``Site`` -- same layout, grown by merging each stored map in,
+                   as its latest round
 
 Storage only: create a map, grow the site, list/resolve tags. Rendering and
 segmentation are pipeline stages that take a ``Map``.
@@ -21,6 +23,7 @@ from swiftmap.database.site import Site
 
 MAPS_DIRNAME = "maps"
 SITE_DIRNAME = "site"
+ROUNDS_DIRNAME = "rounds"
 
 
 class Database:
@@ -32,7 +35,8 @@ class Database:
         self.site_dir = os.path.join(root, SITE_DIRNAME)
         os.makedirs(self.maps_dir, exist_ok=True)
         self.site = Site(self.site_dir)
-        self.maps: Dict[str, Map] = {}     # map id -> Map, the id everything is passed by
+        self.maps: Dict[str, Map] = {}     # map id -> its latest round, the id everything is passed by
+        self.rounds: Dict[str, List[Map]] = {}     # map id -> every round, the batch's first
         self._load_maps()
         self._load_site()
 
@@ -46,9 +50,16 @@ class Database:
 
     def grow_site(self, map_id: str,
                   conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD) -> bool:
-        """Merge a stored map into the site; False if it has nothing to contribute."""
+        """Merge a stored map's latest round into the site, in place of an earlier round
+        of it; False if it has nothing to contribute."""
         map_ = self.get_map(map_id)
-        return False if map_ is None else self.site.grow(map_, conf_threshold)
+        if map_ is None:
+            return False
+        earlier = next((m for m in self.site.maps if m.meta.name == map_id and m is not map_),
+                       None)
+        if earlier is not None:
+            self.site.drop(earlier)
+        return self.site.grow(map_, conf_threshold)
     
     def del_site(self) -> bool:
         """Delete the site from disk and start it over."""
@@ -62,16 +73,26 @@ class Database:
             return
         for tag in sorted(os.listdir(self.maps_dir)):
             path = os.path.join(self.maps_dir, tag)
-            if os.path.isdir(path):
-                self.maps[tag] = Map(name=tag, path=path).load()
+            if not os.path.isdir(path):
+                continue
+            rounds_dir = os.path.join(path, ROUNDS_DIRNAME)
+            rounds = sorted(int(k) for k in os.listdir(rounds_dir) if k.isdigit()) \
+                if os.path.isdir(rounds_dir) else []
+            self.rounds[tag] = [Map(name=tag, path=path).load()] + [
+                Map(name=tag, path=os.path.join(rounds_dir, str(k))).load() for k in rounds]
+            self.maps[tag] = self.rounds[tag][-1]
 
     def get_maps(self) -> List[Map]:
         """Stored maps, newest first."""
         return list(self.maps.values())[::-1]
 
     def get_map(self, map_id: str) -> Optional[Map]:
-        """The stored map with this id, or None if there is no such map."""
+        """The latest round of the stored map with this id, or None if there is no such map."""
         return self.maps.get(map_id)
+
+    def get_rounds(self, map_id: str) -> List[Map]:
+        """Every round of the stored map with this id, the batch's first."""
+        return self.rounds.get(map_id, [])
     
     def del_map(self, map_id: str) -> bool:
         """Delete a stored map from the registry, the site and disk; False if there is no such map."""
@@ -80,7 +101,7 @@ class Database:
             return False
         if self.site.drop(map_):
             self.site.write2disk()     # the merged cloud on disk no longer includes it
-        shutil.rmtree(map_.path, ignore_errors=True)
+        shutil.rmtree(self.rounds.pop(map_id)[0].path, ignore_errors=True)
         return True
 
     def create_map(self, created: datetime = None) -> Map:
@@ -90,5 +111,15 @@ class Database:
         path = os.path.join(self.maps_dir, tag)
         os.makedirs(path, exist_ok=True)
         self.maps[tag] = Map(name=tag, path=path)
+        self.rounds[tag] = [self.maps[tag]]
         return self.maps[tag]
+
+    def create_round(self, map_id: str) -> Map:
+        """Create an empty next round of a stored map, under its rounds/, as its latest."""
+        rounds = self.rounds[map_id]
+        path = os.path.join(rounds[0].path, ROUNDS_DIRNAME, str(len(rounds)))
+        os.makedirs(path, exist_ok=True)
+        rounds.append(Map(name=map_id, path=path))
+        self.maps[map_id] = rounds[-1]
+        return rounds[-1]
 

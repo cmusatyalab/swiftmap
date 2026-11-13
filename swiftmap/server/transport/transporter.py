@@ -364,8 +364,8 @@ class Transporter:
         map_id = self._close_batch(batch).meta.name
         self._batches.put(map_id)
 
-    def _close_batch(self, batch: List[Tuple[str, GPS]]) -> Map:
-        map_ = self.db.create_map()
+    def _close_batch(self, batch: List[Tuple[str, GPS]], map_: Optional[Map] = None) -> Map:
+        map_ = map_ or self.db.create_map()
         images, all_gps = [], []
         
         for idx, (img_path, gps) in enumerate(batch):
@@ -406,14 +406,15 @@ class Transporter:
         return frames
 
     def rebuild_map(self, map_id: str, frames: List[Tuple[str, GPS]]) -> str:
-        """A new Map of ``map_id``'s keyframes and the ``frames`` sent back; its id."""
+        """The next round of ``map_id``: its latest round's images and the ``frames`` sent
+        back, as its new latest round; its id."""
         batch = []
         old = self.db.get_map(map_id)
         for path, gps in zip(old.get_input_keyframe_paths(), old.get_input_gps()):
             copy = os.path.join(self.temp_dir, f"rebuild_{os.path.basename(path)}")
             shutil.copy2(path, copy)
             batch.append((copy, gps))
-        return self._close_batch(batch + frames).meta.name
+        return self._close_batch(batch + frames, self.db.create_round(map_id)).meta.name
 
 
     def next_map_id(self) -> Optional[str]:

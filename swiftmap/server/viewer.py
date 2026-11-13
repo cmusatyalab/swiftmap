@@ -49,9 +49,9 @@ def _site_status(server) -> str:
             f"Origin {site.origin}")
 
 
-def _map_status(server, map_id) -> str:
-    """One map's summary, like the site's, from the numbers its scene_geo.geojson carries."""
-    map_ = server.db.get_map(map_id) if map_id else None
+def _map_status(server, map_id, round_=None) -> str:
+    """One round of one map's summary, like the site's."""
+    map_ = server.map_round(map_id, round_) if map_id else None
     if map_ is None:
         return "**No map selected.**"
     head = f"**Map:** {map_.meta.num_keyframes} keyframe(s)"
@@ -75,9 +75,15 @@ def build_viewer(server):
     """Build the results viewer Blocks for ``server``. Raises if gradio is absent."""
     import gradio as gr
 
-    def show_map(map_id):
-        scenes = server.map_scenes(map_id) if map_id else {}
-        return scenes.get("scene"), scenes.get("confidence"), _map_status(server, map_id)
+    def show_map(map_id, round_=None):
+        """One round of the map (its latest unless ``round_`` is one of its rounds), and the
+        round picker offering every round of it."""
+        rounds = server.map_rounds(map_id) if map_id else []
+        if round_ not in [k for _, k in rounds]:
+            round_ = rounds[-1][1] if rounds else None
+        scenes = server.map_scenes(map_id, round_) if map_id else {}
+        return (gr.update(choices=rounds, value=round_), scenes.get("scene"),
+                scenes.get("confidence"), _map_status(server, map_id, round_))
 
     def show_site(view, stage):
         """The chosen view's GLB at the chosen stage; Segmentation has its prompt, no stages."""
@@ -190,9 +196,11 @@ def build_viewer(server):
 
         # ------------------------------------------------------------------ maps
         with gr.Tab("Maps") as map_tab:
-            gr.Markdown("One batch of keyframes, in its own local coordinates.")
+            gr.Markdown("One batch of keyframes, in its own local coordinates; in NFN mode, "
+                        "each round mapped again with the frames sent back.")
             with gr.Row():
                 map_dd = gr.Dropdown(label="Map", choices=[], scale=4)
+                map_round = gr.Dropdown(label="Round", choices=[], scale=1, min_width=140)
                 map_refresh = gr.Button("Refresh", scale=0, min_width=120)
                 map_del = gr.Button("Delete map", variant="stop", scale=0, min_width=140)
             map_status = gr.Markdown()
@@ -229,15 +237,16 @@ def build_viewer(server):
 
         poll = [map_dd, site_status, frame_status, latest, listed, mapping, site_stage, staged]
         polled = [map_dd, listed, site_stage, staged]
-        map_views = [map_scene, map_conf, map_status]      # what show_map fills
+        map_views = [map_round, map_scene, map_conf, map_status]      # what show_map fills
+        map_shown = [map_dd, map_round]
         demo.load(tick, inputs=polled, outputs=poll)
-        demo.load(show_map, inputs=[map_dd], outputs=map_views)
+        demo.load(show_map, inputs=map_shown, outputs=map_views)
         # a reloaded page shows the filter as the server has it, not the default
         demo.load(lambda: server.batch_status()["keyframe_filter"], outputs=[kf_filter])
         gr.Timer(3.0).tick(tick, inputs=polled, outputs=poll)
 
         # 3D views load with their tab, so they are never handed a value while hidden
-        map_tab.select(show_map, inputs=[map_dd], outputs=map_views)
+        map_tab.select(show_map, inputs=map_shown, outputs=map_views)
         site_shown = [site_view, site_stage]
         site_views = [site_model, seg_panel, site_stage]      # what show_site fills
         site_tab.select(show_site, inputs=site_shown, outputs=site_views)
@@ -245,6 +254,8 @@ def build_viewer(server):
         site_stage.input(on("Rendering the site at that stage…"), outputs=[busy]).then(
             show_site, inputs=site_shown, outputs=site_views).then(off, outputs=[busy])
         map_dd.change(show_map, inputs=[map_dd], outputs=map_views)
+        map_round.input(on("Loading that round…"), outputs=[busy]).then(
+            show_map, inputs=map_shown, outputs=map_views).then(off, outputs=[busy])
 
         # every action greys the viewport until it returns
         clear_btn.click(on("Clearing the collected frames…"), outputs=[busy]).then(
@@ -260,7 +271,7 @@ def build_viewer(server):
                         trigger_mode="always_last")
         rounds.input(do_rounds, inputs=[rounds], outputs=[frame_msg], trigger_mode="always_last")
         map_refresh.click(on("Loading the map…"), outputs=[busy]).then(
-            show_map, inputs=[map_dd], outputs=map_views).then(off, outputs=[busy])
+            show_map, inputs=map_shown, outputs=map_views).then(off, outputs=[busy])
         map_del.click(on("Deleting the map…"), outputs=[busy]).then(
             do_delete, inputs=[map_dd], outputs=[map_dd, map_msg]).then(off, outputs=[busy])
         for start in (seg_btn.click, seg_query.submit):      # the button, or Enter

@@ -197,9 +197,22 @@ class AutoMappingServer:
         """Stored map ids, newest first."""
         return [m.meta.name for m in self.db.get_maps()]
 
-    def map_scenes(self, map_id: str) -> Dict[str, Optional[str]]:
-        """The local scene and confidence GLBs of one map, as paths a viewer can load."""
-        map_ = self.db.get_map(map_id)
+    def map_rounds(self, map_id: str) -> List[Tuple[str, int]]:
+        """(label, round) of each round of one map: the batch, then each NFN round."""
+        return [("Batch" if k == 0 else f"Round {k}", k)
+                for k in range(len(self.db.get_rounds(map_id)))]
+
+    def map_round(self, map_id: str, round_: Optional[int] = None):
+        """One round of one map, its latest if ``round_`` is None or not one of them."""
+        rounds = self.db.get_rounds(map_id)
+        if not rounds:
+            return None
+        return rounds[round_] if round_ is not None and 0 <= round_ < len(rounds) else rounds[-1]
+
+    def map_scenes(self, map_id: str, round_: Optional[int] = None) -> Dict[str, Optional[str]]:
+        """The local scene and confidence GLBs of one round of one map (its latest by
+        default), as paths a viewer can load."""
+        map_ = self.map_round(map_id, round_)
         if map_ is None:
             return {}
         return {name: self._existing(map_.local_dir, filename) for name, filename in

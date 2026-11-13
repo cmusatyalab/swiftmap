@@ -230,7 +230,9 @@ saying what is running; while a batch is being mapped, the live server log shows
   targets, and maps the old images again with them, for *NFN rounds* rounds (default 1),
   ignoring new frames meanwhile; off, batches are mapped without planning.
 - **Maps** — every stored map, newest first, with its reconstruction and confidence cloud in local
-  coordinates. *Delete map* removes it **and** its contribution to the site.
+  coordinates. An NFN batch and its rounds are one map: *Round* picks the batch or a round to view,
+  the last round by default. *Delete map* removes it, every round, **and** its contribution to the
+  site.
 - **Site** — the merged map, one view at a time:
   - **Points** — true colour.
   - **Confidence** — red (low) to green (high) on a fixed 0–25 scale, so iterations are comparable.
@@ -240,7 +242,7 @@ saying what is running; while a batch is being mapped, the live server log shows
 
 The site summary shows the map count, point count and **mean confidence**. That is VGGT's per-point
 confidence — an inverse-error weight with no upper bound, not a percentage. Each voxel keeps the
-highest confidence any map observed for it, so the mean rises as flights re-observe the same ground.
+highest confidence any map observed for it, so the mean rises as flights re-observe the same ground. A map with NFN rounds counts as its last round: each round replaces the one before it in the site.
 
 ---
 
@@ -265,7 +267,9 @@ output/
 │       │       ├── prediction.npz            # raw backbone output (points, conf, poses)
 │       │       └── model_input/              # the frames as the model saw them
 │       ├── georeference/transform.json       # local → ENU similarity transform + origin
-│       └── nextflightplan/next_flight.kml    # NFN plan
+│       ├── nextflightplan/next_flight.kml    # NFN plan
+│       └── rounds/1/ …                       # each NFN round: the same layout, its images
+│                                             # the round before's plus the frames sent back
 └── site/
     ├── site.glb                              # merged cloud, true colour
     ├── site_confidence.glb                   # merged cloud, confidence-coloured
