@@ -10,6 +10,11 @@ Per frame, a client sends:
     [ 4-byte  big-endian uint32      image size            ]
     [ <image size> bytes             JPEG image            ]
     [ 24-byte  3x big-endian float64  GPS: lat, lon, alt    ]   (NaN triple = no GPS)
+    [ 1-byte   uint8                  kind                  ]
+
+The kind is KIND_FRAME for a new frame, KIND_REACHBACK for an older frame sent back for
+the last NFN plan, and KIND_REACHBACK_DONE, with no image (size 0), once every frame sent
+back for it is in.
 
 The server replies:
 
@@ -36,9 +41,15 @@ SIZE_FORMAT = "!I"    # 4-byte big-endian unsigned image-size header
 GPS_FORMAT = "!3d"    # 3x big-endian float64: lat, lon, alt
 REPLY_FORMAT = "3d"   # 3x native-endian float64: status, kf_count, total
 PAYLOAD_LEN_FORMAT = "!I"  # 4-byte big-endian length of the trailing reply payload
+KIND_FORMAT = "!B"    # what the frame is
 
 SIZE_NBYTES = struct.calcsize(SIZE_FORMAT)    # 4
 GPS_NBYTES = struct.calcsize(GPS_FORMAT)      # 24
+KIND_NBYTES = struct.calcsize(KIND_FORMAT)    # 1
+
+KIND_FRAME = 0
+KIND_REACHBACK = 1
+KIND_REACHBACK_DONE = 2
 REPLY_NBYTES = struct.calcsize(REPLY_FORMAT)  # 24 (status header only)
 PAYLOAD_LEN_NBYTES = struct.calcsize(PAYLOAD_LEN_FORMAT)  # 4
 
@@ -70,6 +81,10 @@ def pack_gps(gps) -> bytes:
     """Pack (lat, lon, alt) — or None as a NaN triple — into the GPS field."""
     lat, lon, alt = gps if gps is not None else (float("nan"),) * 3
     return struct.pack(GPS_FORMAT, lat, lon, alt)
+
+
+def pack_kind(kind: int) -> bytes:
+    return struct.pack(KIND_FORMAT, kind)
 
 
 def unpack_gps(buf: bytes):

@@ -225,8 +225,9 @@ class FlightPlan:
                 f"num_waypoints={len(self.waypoints)})")
 
 
-    def to_kml(self, doc_name: str = "next_flight") -> Optional[str]:
-        """One KML holding the planned waypoints and the area they enclose.
+    def to_kml(self, doc_name: str = "next_flight", reachback: int = 0) -> Optional[str]:
+        """One KML holding the planned waypoints and the area they enclose, and how many
+        frames already taken to send back for the targets the waypoints look at.
 
         The polygon's ring is the waypoints themselves, at the same altitude, so the
         two layers sit on top of each other. None if there are no waypoints.
@@ -254,6 +255,8 @@ class FlightPlan:
                 f'    <name>{doc_name}</name>\n'
                 f'{self._STYLE}\n'
                 f'{self._POLY_STYLE}\n'
+                f'    <ExtendedData><Data name="reachback"><value>{reachback}</value></Data>'
+                f'</ExtendedData>\n'
                 f'{self._area_placemark()}'
                 f'{pins}\n'
                 '  </Document>\n'

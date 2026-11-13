@@ -38,6 +38,9 @@ NFN_STANDOFF_M = 15.0
 NFN_TILT_DEG = 35.0
 NFN_MIN_CLUSTER_POINTS = 30
 NFN_MAX_VIEWPOINTS = int(os.environ.get("NFN_MAX_VIEWPOINTS", "10"))
+# NFN mode: frames already taken to send back per plan, and how long to wait for them.
+NFN_REACHBACK_COUNT = int(os.environ.get("NFN_REACHBACK_COUNT", "10"))
+NFN_REACHBACK_TIMEOUT_S = float(os.environ.get("NFN_REACHBACK_TIMEOUT_S", "120"))
 
 # --- Semantic segmentation -----------------------------------------
 # Point SAM3_CHECKPOINT at a local .pt; empty falls back to the facebook/sam3 hub.

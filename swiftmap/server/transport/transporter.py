@@ -12,6 +12,7 @@ The wire format lives in ``swiftmap.server.transport.protocol``.
 """
 
 import os
+import shutil
 import socket
 import csv
 import struct
@@ -71,6 +72,10 @@ class Transporter:
         self._batch: List[Tuple[str, GPS]] = []
         self._batch_lock = threading.Lock()
         self._batches: "queue.Queue" = queue.Queue()
+
+        # The frames sent back for the last NFN plan, and whether all are in.
+        self._reachback: List[Tuple[str, GPS]] = []
+        self._reachback_done = threading.Event()
 
         self.temp_dir = temp_dir
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -150,6 +155,10 @@ class Transporter:
                     break
 
                 image, metadata = result
+                if metadata["kind"] != protocol.KIND_FRAME:
+                    self._add_reachback(image, metadata)
+                    self.send_status_response(client_socket, "success")
+                    continue
 
                 start_time = time.time()
                 is_keyframe = self.process_received_image(image, metadata)
@@ -184,29 +193,36 @@ class Transporter:
                 print("Connection broken while receiving image")
                 return None
 
-            # Decode image from bytes.
-            nparr = np.frombuffer(received_data, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if image is None:
-                print("Failed to decode image from bytes")
-                return None
+            # Decode image from bytes; a reachback-done marker has none.
+            image = None
+            if image_size:
+                image = cv2.imdecode(np.frombuffer(received_data, np.uint8), cv2.IMREAD_COLOR)
+                if image is None:
+                    print("Failed to decode image from bytes")
+                    return None
 
-            # Receive the paired per-frame GPS (NaN triple -> None).
+            # Receive the paired per-frame GPS (NaN triple -> None), then the frame's kind.
             gps_bytes = protocol.recv_exact(client_socket, protocol.GPS_NBYTES)
-            if gps_bytes is None:
+            kind_bytes = protocol.recv_exact(client_socket, protocol.KIND_NBYTES)
+            if gps_bytes is None or kind_bytes is None:
                 print("Connection broken while receiving GPS")
                 return None
             gps = protocol.unpack_gps(gps_bytes)
+            kind = struct.unpack(protocol.KIND_FORMAT, kind_bytes)[0]
+            if image is None and kind != protocol.KIND_REACHBACK_DONE:
+                print("Received a frame without an image")
+                return None
 
             metadata = {
                 "timestamp": datetime.now(),
                 "image_size": image_size,
-                "image_shape": image.shape,
+                "image_shape": None if image is None else image.shape,
                 "frame_id": self.total_frames_received + 1,
                 "gps": gps,
+                "kind": kind,
             }
 
-            print(f"Successfully received image: {image.shape}"
+            print(f"Successfully received image: {metadata['image_shape']} kind={kind}"
                   + (f" gps=({gps[0]:.6f},{gps[1]:.6f},{gps[2]:.1f})" if gps else " (no gps)"))
             return image, metadata
 
@@ -287,12 +303,13 @@ class Transporter:
             print(f"Error processing image: {e}")
             return False
 
-    def _save_keyframe(self, image: np.ndarray, metadata: Dict[str, Any]) -> str:
+    def _save_keyframe(self, image: np.ndarray, metadata: Dict[str, Any],
+                       prefix: str = "keyframe") -> str:
         """Save a keyframe to the scratch dir; returns its path, or "" on failure."""
         try:
             timestamp_str = metadata["timestamp"].strftime("%Y%m%d_%H%M%S_%f")
             frame_id = metadata["frame_id"]
-            image_name = f"keyframe_{frame_id:06d}_{timestamp_str}.jpg"
+            image_name = f"{prefix}_{frame_id:06d}_{timestamp_str}.jpg"
             image_path = os.path.join(self.temp_dir, image_name)
 
             cv2.imwrite(image_path, image)
@@ -339,6 +356,41 @@ class Transporter:
             all_gps.append(gps)
         map_.update_input(images, all_gps)
         return map_
+
+    # ===================================================================== reachback
+    def _add_reachback(self, image: Optional[np.ndarray], metadata: Dict[str, Any]):
+        """Keep a frame sent back for the last plan; the done marker says all are in."""
+        if image is not None:
+            path = self._save_keyframe(image, metadata, prefix="reachback")
+            gps = metadata["gps"]
+            with self._batch_lock:
+                self._reachback.append((path, GPS(*gps) if gps is not None else None))
+        if metadata["kind"] == protocol.KIND_REACHBACK_DONE:
+            self._reachback_done.set()
+
+    def expect_reachback(self):
+        """Forget any frames sent back so far, before a plan asks for more."""
+        with self._batch_lock:
+            self._reachback = []
+        self._reachback_done.clear()
+
+    def wait_reachback(self, timeout: float) -> List[Tuple[str, GPS]]:
+        """The frames sent back for the last plan, once all are in or ``timeout`` passed."""
+        if not self._reachback_done.wait(timeout):
+            print(f"[transport] reachback not done after {timeout:.0f}s; using what came")
+        with self._batch_lock:
+            frames, self._reachback = self._reachback, []
+        return frames
+
+    def rebuild_map(self, map_id: str, frames: List[Tuple[str, GPS]]) -> str:
+        """A new Map of ``map_id``'s keyframes and the ``frames`` sent back; its id."""
+        batch = []
+        old = self.db.get_map(map_id)
+        for path, gps in zip(old.get_input_keyframe_paths(), old.get_input_gps()):
+            copy = os.path.join(self.temp_dir, f"rebuild_{os.path.basename(path)}")
+            shutil.copy2(path, copy)
+            batch.append((copy, gps))
+        return self._close_batch(batch + frames).meta.name
 
 
     def next_map_id(self) -> Optional[str]:

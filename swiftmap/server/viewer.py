@@ -123,6 +123,16 @@ def build_viewer(server):
         return ("Keyframe filter **on**: only frames that add enough motion are kept."
                 if enabled else "Keyframe filter **off**: every frame that arrives is kept.")
 
+    def do_nfn(enabled):
+        server.set_nfn_mode(enabled)
+        return ("NFN mode **on**: each batch is planned, frames already taken for its weak "
+                "targets are sent back, and the batch is mapped again with them."
+                if enabled else "NFN mode **off**: batches are mapped without planning.")
+
+    def do_reachback(count):
+        count = server.set_reachback_count(count)["count"]
+        return f"Each plan asks for **{count}** reachback image(s)."
+
     def do_clear_seg():
         """Throw away every target, leaving the Segmentation view empty."""
         result = server.clear_segmentations()
@@ -165,6 +175,10 @@ def build_viewer(server):
                 render_btn = gr.Button("Render now", variant="primary", scale=0, min_width=140)
                 kf_filter = gr.Checkbox(value=False, label="Keyframe filter enable",
                                         info="Off keeps every frame", scale=0, min_width=220)
+                nfn_mode = gr.Checkbox(value=False, label="NFN mode",
+                                       info="Plan, reach back, map again", scale=0, min_width=200)
+                reachback = gr.Number(value=server.reachback_count, label="Reachback images",
+                                      precision=0, minimum=0, scale=0, min_width=160)
             frame_msg = gr.Markdown()
             latest = gr.Image(label="Latest keyframe", height=420, interactive=False)
 
@@ -233,6 +247,10 @@ def build_viewer(server):
             do_render, outputs=[frame_msg]).then(off, outputs=[busy])
         # only flips a flag, so no scrim; always_last, so the server ends on the last click
         kf_filter.input(do_filter, inputs=[kf_filter], outputs=[frame_msg],
+                        trigger_mode="always_last")
+        nfn_mode.input(do_nfn, inputs=[nfn_mode], outputs=[frame_msg],
+                       trigger_mode="always_last")
+        reachback.input(do_reachback, inputs=[reachback], outputs=[frame_msg],
                         trigger_mode="always_last")
         map_refresh.click(on("Loading the map…"), outputs=[busy]).then(
             show_map, inputs=[map_dd], outputs=map_views).then(off, outputs=[busy])

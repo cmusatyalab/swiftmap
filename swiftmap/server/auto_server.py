@@ -78,6 +78,8 @@ class AutoMappingServer:
         self.is_running = False
         self.processing = False        # the worker is mid-pipeline on a batch
         self.keyframe_filter = False
+        self.nfn_mode = False
+        self.reachback_count = constants.NFN_REACHBACK_COUNT
         self.log: Deque[str] = deque(maxlen=200)
         sys.stdout = _LogTail(sys.stdout, self.log)
         self.transport_thread = None
@@ -147,20 +149,33 @@ class AutoMappingServer:
 
             self.processing = True
             try:
-                result = self.session.process(map_id)
-                if "error" in result:
-                    print(f"[swiftmap-server] {result['error']}")
+                nfn = self.nfn_mode
+                if not self._map(map_id, plan=nfn) or not nfn:
                     continue
-
-                self.db.get_map(map_id).write2disk()
-                if self.db.grow_site(map_id):
-                    self.db.get_site().write2disk()
-
-                plan_kml = self.db.get_map(map_id).get_flight_plan().to_kml()
-                if plan_kml:
-                    self.send_to_client(plan_kml.encode())
+                kml = self.db.get_map(map_id).get_flight_plan().to_kml(
+                    reachback=self.reachback_count)
+                if not kml:
+                    continue
+                self.transporter.expect_reachback()
+                self.send_to_client(kml.encode())
+                if self.reachback_count:
+                    frames = self.transporter.wait_reachback(constants.NFN_REACHBACK_TIMEOUT_S)
+                    print(f"[swiftmap-server] {len(frames)} frame(s) sent back for {map_id}")
+                    if frames:
+                        self._map(self.transporter.rebuild_map(map_id, frames), plan=False)
             finally:
                 self.processing = False
+
+    def _map(self, map_id: str, plan: bool) -> bool:
+        """Map one closed Map and merge it into the site; whether it worked."""
+        result = self.session.process(map_id, plan=plan)
+        if "error" in result:
+            print(f"[swiftmap-server] {result['error']}")
+            return False
+        self.db.get_map(map_id).write2disk()
+        if self.db.grow_site(map_id):
+            self.db.get_site().write2disk()
+        return True
 
     # ============================================================ viewer API
     def list_map_ids(self) -> List[str]:
@@ -246,6 +261,17 @@ class AutoMappingServer:
         if self.transporter:
             self.transporter.set_keyframe_filter(self.keyframe_filter)
         return {"success": True, "enabled": self.keyframe_filter}
+
+    def set_nfn_mode(self, enabled: bool) -> Dict[str, Any]:
+        """Plan each batch, fetch frames already taken for its weak targets, and map it again
+        with them; or just map each batch."""
+        self.nfn_mode = bool(enabled)
+        return {"success": True, "enabled": self.nfn_mode}
+
+    def set_reachback_count(self, count) -> Dict[str, Any]:
+        """How many frames already taken each plan asks for."""
+        self.reachback_count = max(0, int(count or 0))
+        return {"success": True, "count": self.reachback_count}
 
     def del_map(self, map_id: str) -> Dict[str, Any]:
         """Delete a stored map, and drop what it contributed to the site."""

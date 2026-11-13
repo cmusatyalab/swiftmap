@@ -42,8 +42,10 @@ class MappingSession:
         self.segmenter: BaseSegmenter = get_segmenter(backbone[1])
 
     # =============================================================== pipeline
-    def process(self, map_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Run every stage over one closed Map, stopping at the first failure."""
+    def process(self, map_id: str, params: Optional[Dict[str, Any]] = None,
+                plan: bool = True) -> Dict[str, Any]:
+        """Run every stage over one closed Map, stopping at the first failure; without
+        ``plan``, it stops after GPS alignment."""
         map_ = self.db.get_map(map_id)
         if map_ is None:
             return {"error": f"Unknown map '{map_id}'"}
@@ -56,9 +58,10 @@ class MappingSession:
         if "error" in aligned:
             return {"error": f"GPS align failed: {aligned['error']}"}
 
-        plan = self.plan(map_)
-        if "error" in plan:
-            return {"error": f"NFN failed: {plan['error']}"}
+        if plan:
+            planned = self.plan(map_)
+            if "error" in planned:
+                return {"error": f"NFN failed: {planned['error']}"}
         return {"success": True, "map_id": map_id}
 
     # ---------------------------------------------------------------- reconstruction

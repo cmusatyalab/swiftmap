@@ -130,10 +130,12 @@ class MappingTestClient:
             self.socket.sendall(protocol.pack_size(len(image_bytes)))
             self.socket.sendall(image_bytes)
             self.socket.sendall(protocol.pack_gps(gps))
+            self.socket.sendall(protocol.pack_kind(protocol.KIND_FRAME))
 
             self.stats["images_sent"] += 1
             self.stats["total_bytes_sent"] += (
-                len(image_bytes) + protocol.SIZE_NBYTES + protocol.GPS_NBYTES)
+                len(image_bytes) + protocol.SIZE_NBYTES + protocol.GPS_NBYTES
+                + protocol.KIND_NBYTES)
 
             # Receive the status reply.
             reply = protocol.recv_reply(self.socket)
