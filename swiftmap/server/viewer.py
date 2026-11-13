@@ -125,13 +125,17 @@ def build_viewer(server):
 
     def do_nfn(enabled):
         server.set_nfn_mode(enabled)
-        return ("NFN mode **on**: each batch is planned, frames already taken for its weak "
-                "targets are sent back, and the batch is mapped again with them."
+        return ("NFN mode **on**: once a batch closes, only reachback images are taken; each "
+                "round plans, fetches them, and maps the old images again with them."
                 if enabled else "NFN mode **off**: batches are mapped without planning.")
 
     def do_reachback(count):
         count = server.set_reachback_count(count)["count"]
         return f"Each plan asks for **{count}** reachback image(s)."
+
+    def do_rounds(rounds):
+        rounds = server.set_nfn_rounds(rounds)["rounds"]
+        return f"Each batch gets **{rounds}** NFN round(s), each on the map the last one made."
 
     def do_clear_seg():
         """Throw away every target, leaving the Segmentation view empty."""
@@ -177,6 +181,8 @@ def build_viewer(server):
                                         info="Off keeps every frame", scale=0, min_width=220)
                 nfn_mode = gr.Checkbox(value=False, label="NFN mode",
                                        info="Plan, reach back, map again", scale=0, min_width=200)
+                rounds = gr.Number(value=server.nfn_rounds, label="NFN rounds",
+                                   precision=0, minimum=1, scale=0, min_width=140)
                 reachback = gr.Number(value=server.reachback_count, label="Reachback images",
                                       precision=0, minimum=0, scale=0, min_width=160)
             frame_msg = gr.Markdown()
@@ -252,6 +258,7 @@ def build_viewer(server):
                        trigger_mode="always_last")
         reachback.input(do_reachback, inputs=[reachback], outputs=[frame_msg],
                         trigger_mode="always_last")
+        rounds.input(do_rounds, inputs=[rounds], outputs=[frame_msg], trigger_mode="always_last")
         map_refresh.click(on("Loading the map…"), outputs=[busy]).then(
             show_map, inputs=[map_dd], outputs=map_views).then(off, outputs=[busy])
         map_del.click(on("Deleting the map…"), outputs=[busy]).then(

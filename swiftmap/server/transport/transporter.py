@@ -73,9 +73,12 @@ class Transporter:
         self._batch_lock = threading.Lock()
         self._batches: "queue.Queue" = queue.Queue()
 
-        # The frames sent back for the last NFN plan, and whether all are in.
+        # The frames sent back for the last NFN plan, and whether all are in. In NFN mode,
+        # new frames are ignored from when a batch closes until its rounds are done.
         self._reachback: List[Tuple[str, GPS]] = []
         self._reachback_done = threading.Event()
+        self.nfn_mode = False
+        self.holding = False
 
         self.temp_dir = temp_dir
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -286,6 +289,10 @@ class Transporter:
             self.stats["total_frames"] = self.total_frames_received
             self.stats["last_frame_time"] = metadata["timestamp"]
 
+            if self.holding:
+                print(f"Frame skipped: {self.total_frames_received} (NFN rounds running)")
+                return False
+
             if self.keyframe_filter and not self.keyframe_selector.is_keyframe(image):
                 print(f"Frame skipped: {self.total_frames_received} (not a keyframe)")
                 return False
@@ -337,6 +344,7 @@ class Transporter:
                 return
             batch= self._batch
             self._batch = []
+            self.holding = self.nfn_mode
 
         map_id = self._close_batch(batch).meta.name
         self._batches.put(map_id)
@@ -426,6 +434,7 @@ class Transporter:
             if not self._batch:
                 return None
             batch, self._batch = self._batch, []
+            self.holding = self.nfn_mode
 
         map_id = self._close_batch(batch).meta.name
         self._batches.put(map_id)

@@ -69,8 +69,11 @@ fix. The server runs every batch through this pipeline:
    the number of frames already taken to send back for them; the plan rides back to the client
    on the next TCP reply. The server waits for those frames (marked as sent back on the wire,
    then a done marker; `NFN_REACHBACK_TIMEOUT_S`, default 120 s, at most), maps the batch's
-   keyframes and them as a new Map, and merges it into the site. New keyframes keep collecting
-   into the next batch meanwhile.
+   keyframes and them as a new Map, and merges it into the site. That is one round; with
+   *NFN rounds* above 1, the next round plans on the map the last one made, until the
+   rounds are done or no frames come back. From when the batch closes until its rounds are
+   done, new frames are ignored: only the frames sent back are taken, and every round maps the
+   old images again with them.
 
 Each frame on the wire ends with a kind byte: a new frame, a frame sent back for the last plan,
 or, with no image, the marker that all of those are in (`swiftmap/server/transport/protocol.py`).
@@ -189,6 +192,7 @@ empty `SWIFTMAP_BACKBONE` resolves to no backbone at all.
 | `SAM3_BPE_PATH` | *unset → bundled with `sam3`* | SAM 3 tokenizer vocab |
 | `SAM3_CONF_THRESHOLD` | `0.5` | minimum SAM 3 instance confidence |
 | `NFN_MAX_VIEWPOINTS` | `10` | cap on suggested viewpoints per plan |
+| `NFN_ROUNDS` | `1` | NFN mode: rounds per batch, each on the map the last one made (also in the viewer) |
 | `NFN_REACHBACK_COUNT` | `10` | NFN mode: frames already taken to send back per plan (also in the viewer) |
 | `NFN_REACHBACK_TIMEOUT_S` | `120` | NFN mode: longest wait for them before mapping again with what came |
 
@@ -219,7 +223,8 @@ saying what is running; while a batch is being mapped, the live server log shows
   collected frames; *Render now* closes a partial batch and maps it immediately; the
   *keyframe filter* toggle keeps every frame instead of only those with enough motion. *NFN mode*
   (off by default) plans after each batch, fetches *Reachback images* (default 10) for its weak
-  targets, and maps the batch again with them; off, batches are mapped without planning.
+  targets, and maps the old images again with them, for *NFN rounds* rounds (default 1),
+  ignoring new frames meanwhile; off, batches are mapped without planning.
 - **Maps** — every stored map, newest first, with its reconstruction and confidence cloud in local
   coordinates. *Delete map* removes it **and** its contribution to the site.
 - **Site** — the merged map, one view at a time:

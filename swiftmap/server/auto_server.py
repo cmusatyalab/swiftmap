@@ -79,6 +79,7 @@ class AutoMappingServer:
         self.processing = False        # the worker is mid-pipeline on a batch
         self.keyframe_filter = False
         self.nfn_mode = False
+        self.nfn_rounds = constants.NFN_ROUNDS
         self.reachback_count = constants.NFN_REACHBACK_COUNT
         self.log: Deque[str] = deque(maxlen=200)
         sys.stdout = _LogTail(sys.stdout, self.log)
@@ -98,6 +99,7 @@ class AutoMappingServer:
                                        host=self.cfg.host, port=self.cfg.port,
                                        temp_dir=self.temp_dir,
                                        keyframe_filter=self.keyframe_filter)
+        self.transporter.nfn_mode = self.nfn_mode
 
         print(f"[swiftmap-server] starting on {self.cfg.host}:{self.cfg.port} "
               f"(backbone={self.cfg.backbone}, batch_size={self.cfg.batch_size}, "
@@ -149,33 +151,46 @@ class AutoMappingServer:
 
             self.processing = True
             try:
-                nfn = self.nfn_mode
-                if not self._map(map_id, plan=nfn) or not nfn:
-                    continue
-                kml = self.db.get_map(map_id).get_flight_plan().to_kml(
-                    reachback=self.reachback_count)
-                if not kml:
-                    continue
-                self.transporter.expect_reachback()
-                self.send_to_client(kml.encode())
-                if self.reachback_count:
-                    frames = self.transporter.wait_reachback(constants.NFN_REACHBACK_TIMEOUT_S)
-                    print(f"[swiftmap-server] {len(frames)} frame(s) sent back for {map_id}")
-                    if frames:
-                        self._map(self.transporter.rebuild_map(map_id, frames), plan=False)
+                rounds = self.nfn_rounds if self.nfn_mode else 0
+                planned = self._map(map_id, plan=rounds > 0)
+                for done in range(1, rounds + 1):
+                    frames = self._reach_back(map_id) if planned else []
+                    if not frames:
+                        break
+                    print(f"[swiftmap-server] NFN round {done}/{rounds}: mapping {map_id} "
+                          f"again with {len(frames)} frame(s) sent back")
+                    map_id = self.transporter.rebuild_map(map_id, frames)
+                    planned = self._map(map_id, plan=done < rounds)
             finally:
+                self.transporter.holding = False
                 self.processing = False
 
     def _map(self, map_id: str, plan: bool) -> bool:
-        """Map one closed Map and merge it into the site; whether it worked."""
-        result = self.session.process(map_id, plan=plan)
+        """Map one closed Map, plan its next flight if ``plan``, and merge it into the
+        site; whether it was mapped and, if ``plan``, planned."""
+        result = self.session.process(map_id, plan=False)
         if "error" in result:
             print(f"[swiftmap-server] {result['error']}")
             return False
-        self.db.get_map(map_id).write2disk()
+        map_ = self.db.get_map(map_id)
+        planned = not plan or "error" not in self.session.plan(map_)
+        map_.write2disk()
         if self.db.grow_site(map_id):
             self.db.get_site().write2disk()
-        return True
+        return planned
+
+    def _reach_back(self, map_id: str) -> List[Tuple[str, Any]]:
+        """Send ``map_id``'s plan, and wait for the frames already taken sent back for it."""
+        kml = self.db.get_map(map_id).get_flight_plan().to_kml(reachback=self.reachback_count)
+        if not kml:
+            return []
+        self.transporter.expect_reachback()
+        self.send_to_client(kml.encode())
+        if not self.reachback_count:
+            return []
+        frames = self.transporter.wait_reachback(constants.NFN_REACHBACK_TIMEOUT_S)
+        print(f"[swiftmap-server] {len(frames)} frame(s) sent back for {map_id}")
+        return frames
 
     # ============================================================ viewer API
     def list_map_ids(self) -> List[str]:
@@ -264,9 +279,17 @@ class AutoMappingServer:
 
     def set_nfn_mode(self, enabled: bool) -> Dict[str, Any]:
         """Plan each batch, fetch frames already taken for its weak targets, and map it again
-        with them; or just map each batch."""
+        with them, ignoring new frames meanwhile; or just map each batch."""
         self.nfn_mode = bool(enabled)
+        if self.transporter:
+            self.transporter.nfn_mode = self.nfn_mode
+            self.transporter.holding &= self.nfn_mode
         return {"success": True, "enabled": self.nfn_mode}
+
+    def set_nfn_rounds(self, rounds) -> Dict[str, Any]:
+        """How many NFN rounds each batch gets, each on the map the last one made."""
+        self.nfn_rounds = max(1, int(rounds or 1))
+        return {"success": True, "rounds": self.nfn_rounds}
 
     def set_reachback_count(self, count) -> Dict[str, Any]:
         """How many frames already taken each plan asks for."""
