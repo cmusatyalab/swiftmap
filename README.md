@@ -242,7 +242,7 @@ saying what is running; while a batch is being mapped, the live server log shows
 
 The site summary shows the map count, point count and **mean confidence**. That is VGGT's per-point
 confidence — an inverse-error weight with no upper bound, not a percentage. Each voxel keeps the
-highest confidence any map observed for it, so the mean rises as flights re-observe the same ground. A map with NFN rounds counts as its last round: each round replaces the one before it in the site.
+highest confidence any map observed for it, so the mean rises as flights re-observe the same ground. A map with NFN rounds joins the site once, as its last round, when its rounds are done.
 
 ---
 

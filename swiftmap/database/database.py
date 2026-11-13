@@ -6,7 +6,7 @@
                    transform.json, map.json); each NFN round mapped after it, in the
                    same layout, under its rounds/<k>/
     <root>/site/   the ``Site`` -- same layout, grown by merging each stored map in,
-                   as its latest round
+                   as its latest reconstructed round once its rounds are done
 
 Storage only: create a map, grow the site, list/resolve tags. Rendering and
 segmentation are pipeline stages that take a ``Map``.
@@ -50,16 +50,11 @@ class Database:
 
     def grow_site(self, map_id: str,
                   conf_threshold: float = constants.DEFAULT_CONF_THRESHOLD) -> bool:
-        """Merge a stored map's latest round into the site, in place of an earlier round
-        of it; False if it has nothing to contribute."""
-        map_ = self.get_map(map_id)
-        if map_ is None:
-            return False
-        earlier = next((m for m in self.site.maps if m.meta.name == map_id and m is not map_),
-                       None)
-        if earlier is not None:
-            self.site.drop(earlier)
-        return self.site.grow(map_, conf_threshold)
+        """Merge a stored map, as its latest reconstructed round, into the site; False if it
+        has nothing to contribute."""
+        map_ = next((m for m in reversed(self.get_rounds(map_id))
+                     if m.get_pointcloud() is not None), None)
+        return False if map_ is None else self.site.grow(map_, conf_threshold)
     
     def del_site(self) -> bool:
         """Delete the site from disk and start it over."""

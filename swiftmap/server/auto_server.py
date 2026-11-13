@@ -161,13 +161,16 @@ class AutoMappingServer:
                           f"again with {len(frames)} frame(s) sent back")
                     map_id = self.transporter.rebuild_map(map_id, frames)
                     planned = self._map(map_id, plan=done < rounds)
+                if self.db.grow_site(map_id):
+                    self.db.get_site().write2disk()
             finally:
                 self.transporter.release()
                 self.processing = False
 
     def _map(self, map_id: str, plan: bool) -> bool:
-        """Map one closed Map, plan its next flight if ``plan``, and merge it into the
-        site; whether it was mapped and, if ``plan``, planned."""
+        """Map one closed Map (its latest round) and plan its next flight if ``plan``;
+        whether it was mapped and, if ``plan``, planned. The site takes the map once its
+        last round is done."""
         result = self.session.process(map_id, plan=False)
         if "error" in result:
             print(f"[swiftmap-server] {result['error']}")
@@ -175,8 +178,6 @@ class AutoMappingServer:
         map_ = self.db.get_map(map_id)
         planned = not plan or "error" not in self.session.plan(map_)
         map_.write2disk()
-        if self.db.grow_site(map_id):
-            self.db.get_site().write2disk()
         return planned
 
     def _reach_back(self, map_id: str) -> List[Tuple[str, Any]]:
