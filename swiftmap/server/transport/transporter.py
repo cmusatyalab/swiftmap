@@ -33,6 +33,19 @@ from swiftmap.database.map import Map
 from swiftmap.database.types import GPS
 
 
+def log(message: str):
+    """One timestamped line of the transport's log."""
+    print(f"{datetime.now():%H:%M:%S} [transport] {message}")
+
+
+def describe(metadata: Dict[str, Any]) -> str:
+    """An image's size, encoded bytes, and GPS, for the log."""
+    h, w = metadata["image_shape"][:2]
+    gps = metadata["gps"]
+    where = f"gps {gps[0]:.6f},{gps[1]:.6f},{gps[2]:.1f}" if gps else "no gps"
+    return f"{w}x{h}, {metadata['image_size'] / 1e3:.0f} KB, {where}"
+
+
 def image_extension(data: bytes) -> Optional[str]:
     """The file extension of the encoded image ``data``: .webp, .png or .jpg, or None
     if it is none of them."""
@@ -112,9 +125,7 @@ class Transporter:
             self.is_running = True
             self.stats["server_start_time"] = datetime.now()
 
-            print(f"SwiftMap Mapping TCP Server started on {self.host}:{self.port}")
-            print("Waiting for drone clients...")
-            print("Compatible with the bundled test client (test/test_client.py)")
+            log(f"listening on {self.host}:{self.port}")
 
             while self.is_running:
                 try:
@@ -132,18 +143,21 @@ class Transporter:
                     continue  # no client yet; re-check is_running
                 except OSError as e:
                     if self.is_running:
-                        print(f"Error accepting client connection: {e}")
+                        log(f"error accepting a client: {e}")
                     break
 
         except Exception as e:
-            print(f"Server error: {e}")
+            log(f"server error: {e}")
         finally:
             self.stop()
 
 
     def stop(self):
-        """Stop the TCP server, unblock a worker waiting on next_map_id(), clean up."""
-        print("Stopping SwiftMap Mapping TCP Server...")
+        """Stop the TCP server, unblock a worker waiting on next_map_id(), clean up. Once."""
+        if getattr(self, "_stopped", False):
+            return
+        self._stopped = True
+        log("stopping")
         self.is_running = False
 
         if self.server_socket:
@@ -154,13 +168,13 @@ class Transporter:
 
         self._batches.put(None)  # unblock next_map_id()
 
-        print("SwiftMap Mapping TCP Server stopped")
+        log("stopped")
         self.print_final_stats()
 
     # ============================================================ connection handling
     def handle_client(self, client_socket, client_address):
         """Handle one client connection: receive frames, select, reply."""
-        print(f"New mapping client connected: {client_address}")
+        log(f"client {client_address[0]}:{client_address[1]} connected")
 
         self.stats["total_connections"] += 1
         self.stats["active_connections"] += 1
@@ -178,23 +192,16 @@ class Transporter:
                     self.send_status_response(client_socket, "success")
                     continue
 
-                start_time = time.time()
                 is_keyframe = self.process_received_image(image, metadata)
-                processing_time = time.time() - start_time
-
-                if is_keyframe:
-                    self.send_status_response(client_socket, "keyframe_selected",
-                                            f"Processing time: {processing_time*1000:.1f}ms")
-                else:
-                    self.send_status_response(client_socket, "frame_skipped",
-                                            f"Processing time: {processing_time*1000:.1f}ms")
+                self.send_status_response(client_socket,
+                                          "keyframe_selected" if is_keyframe else "frame_skipped")
 
         except Exception as e:
-            print(f"Client {client_address} error: {e}")
+            log(f"client {client_address[0]}:{client_address[1]} error: {e}")
         finally:
             client_socket.close()
             self.stats["active_connections"] -= 1
-            print(f"Mapping client {client_address} disconnected")
+            log(f"client {client_address[0]}:{client_address[1]} disconnected")
 
     def receive_image_from_client(self, client_socket) -> Optional[tuple]:
         """Receive image data from client socket."""
@@ -202,13 +209,12 @@ class Transporter:
             # Receive the image-size header, then the JPEG body.
             size_data = protocol.recv_exact(client_socket, protocol.SIZE_NBYTES)
             if size_data is None:
-                print("Client disconnected")
                 return None
             image_size = struct.unpack(protocol.SIZE_FORMAT, size_data)[0]
 
             received_data = protocol.recv_exact(client_socket, image_size)
             if received_data is None:
-                print("Connection broken while receiving image")
+                log("connection broken while receiving an image")
                 return None
 
             # Decode image from bytes; a reachback-done marker has none.
@@ -216,19 +222,19 @@ class Transporter:
             if image_size:
                 image = cv2.imdecode(np.frombuffer(received_data, np.uint8), cv2.IMREAD_COLOR)
                 if image is None:
-                    print("Failed to decode image from bytes")
+                    log(f"failed to decode a {image_size}-byte image")
                     return None
 
             # Receive the paired per-frame GPS (NaN triple -> None), then the frame's kind.
             gps_bytes = protocol.recv_exact(client_socket, protocol.GPS_NBYTES)
             kind_bytes = protocol.recv_exact(client_socket, protocol.KIND_NBYTES)
             if gps_bytes is None or kind_bytes is None:
-                print("Connection broken while receiving GPS")
+                log("connection broken while receiving GPS")
                 return None
             gps = protocol.unpack_gps(gps_bytes)
             kind = struct.unpack(protocol.KIND_FORMAT, kind_bytes)[0]
             if image is None and kind not in (protocol.KIND_REACHBACK_DONE, protocol.KIND_POLL):
-                print("Received a frame without an image")
+                log(f"dropped a kind-{kind} message without an image")
                 return None
 
             metadata = {
@@ -240,16 +246,13 @@ class Transporter:
                 "gps": gps,
                 "kind": kind,
             }
-
-            print(f"Successfully received image: {metadata['image_shape']} kind={kind}"
-                  + (f" gps=({gps[0]:.6f},{gps[1]:.6f},{gps[2]:.1f})" if gps else " (no gps)"))
             return image, metadata
 
         except Exception as e:
-            print(f"Error receiving image: {e}")
+            log(f"error receiving a message: {e}")
             return None
 
-    def send_status_response(self, client_socket, status_code: str, message: str = "") -> bool:
+    def send_status_response(self, client_socket, status_code: str) -> bool:
         """Send status response back to client."""
         try:
             # 3 float64 status header plus any one-shot payload (e.g. the NFN area KML).
@@ -265,16 +268,10 @@ class Transporter:
                 response_data = protocol.pack_reply(protocol.STATUS_SUCCESS, kf, total, payload)
 
             client_socket.sendall(response_data)
-
-            status_msg = f"{status_code}"
-            if message:
-                status_msg += f": {message}"
-            print(f"Sent status: {status_msg}")
-
             return True
 
         except Exception as e:
-            print(f"Error sending status response: {e}")
+            log(f"error sending a reply: {e}")
             return False
 
     def queue_outbound(self, payload: bytes):
@@ -309,7 +306,7 @@ class Transporter:
             # restart it, so the next frame becomes its fresh reference
             self.keyframe_selector.frame_tracker.reset()
         self.keyframe_filter = enabled
-        print(f"[transport] keyframe filter {'on' if enabled else 'off'}")
+        log(f"keyframe filter {'on' if enabled else 'off'}")
 
     def process_received_image(self, image: np.ndarray, metadata: Dict[str, Any]) -> bool:
         """Select or drop a frame; a selected frame is saved and joins the open batch."""
@@ -319,24 +316,24 @@ class Transporter:
             self.stats["last_frame_time"] = metadata["timestamp"]
 
             if self.holding:
-                print(f"Frame skipped: {self.total_frames_received} (NFN rounds running)")
+                log(f"frame {self.total_frames_received} skipped: NFN round running")
                 return False
 
             if self.keyframe_filter and not self.keyframe_selector.is_keyframe(image):
-                print(f"Frame skipped: {self.total_frames_received} (not a keyframe)")
+                log(f"frame {self.total_frames_received} skipped: not a keyframe")
                 return False
 
             self.total_keyframes_selected += 1
             self.stats["selected_keyframes"] = self.total_keyframes_selected
             img_path = self._save_keyframe(image, metadata)
             gps = self._save_gps(metadata)
+            log(f"keyframe {self.total_keyframes_selected} (batch {len(self._batch) + 1}/"
+                f"{self.batch_size}): {describe(metadata)}")
             self._add_to_batch(img_path, gps)
-
-            print(f"Keyframe selected: {self.total_keyframes_selected}/{self.total_frames_received}")
             return True
 
         except Exception as e:
-            print(f"Error processing image: {e}")
+            log(f"error processing frame {self.total_frames_received}: {e}")
             return False
 
     def _save_keyframe(self, image: np.ndarray, metadata: Dict[str, Any],
@@ -357,11 +354,10 @@ class Transporter:
                     f.write(encoded)
             else:
                 cv2.imwrite(image_path, image)
-            print(f"Keyframe saved: {image_path}")
             return image_path
 
         except Exception as e:
-            print(f"Error saving keyframe: {e}")
+            log(f"error saving a {prefix}: {e}")
             return ""
         
     def _save_gps(self, metadata) -> Optional[GPS]:
@@ -385,6 +381,8 @@ class Transporter:
 
         map_id = self._close_batch(batch).meta.name
         self._batches.put(map_id)
+        log(f"batch full: {len(batch)} keyframes as {map_id}"
+            + ("; holding new frames for its NFN round" if self.holding else ""))
 
     def _close_batch(self, batch: List[Tuple[str, GPS]], map_: Optional[Map] = None) -> Map:
         map_ = map_ or self.db.create_map()
@@ -395,7 +393,7 @@ class Transporter:
             try:
                 os.replace(img_path, os.path.join(map_.images_dir, name))
             except OSError as err:
-                print(f"Error moving keyframe {img_path} -> {name}: {err}")
+                log(f"error moving keyframe {img_path} -> {name}: {err}")
                 continue
             images.append(name)
             all_gps.append(gps)
@@ -410,8 +408,11 @@ class Transporter:
             gps = metadata["gps"]
             with self._batch_lock:
                 self._reachback.append((path, GPS(*gps) if gps is not None else None))
+                n = len(self._reachback)
+            log(f"reachback frame {n}: {describe(metadata)}")
         if metadata["kind"] == protocol.KIND_REACHBACK_DONE:
             self._reachback_done.set()
+            log(f"reachback done: {len(self._reachback)} frame(s) in")
 
     def expect_reachback(self):
         """Forget any frames sent back so far, before a plan asks for more."""
@@ -425,12 +426,12 @@ class Transporter:
         returns at once with whatever came."""
         self._reachback_cutoff = True
         self._reachback_done.set()
-        print("[transport] reachback cut off; mapping with what came")
+        log("reachback cut off; mapping with what came")
 
     def wait_reachback(self, timeout: float) -> List[Tuple[str, GPS]]:
         """The frames sent back for the last plan, once all are in or ``timeout`` passed."""
         if not self._reachback_done.wait(timeout):
-            print(f"[transport] reachback not done after {timeout:.0f}s; using what came")
+            log(f"reachback not done after {timeout:.0f}s; using what came")
         with self._batch_lock:
             frames, self._reachback = self._reachback, []
         return frames
@@ -472,7 +473,7 @@ class Transporter:
             os.remove(self.temp_gps_path)     # the next batch starts its own csv
         except OSError:
             pass
-        print(f"[transport] cleared {len(batch)} collected frame(s)")
+        log(f"cleared {len(batch)} collected frame(s)")
         return len(batch)
 
     def flush_batch(self) -> Optional[str]:
@@ -485,7 +486,7 @@ class Transporter:
 
         map_id = self._close_batch(batch).meta.name
         self._batches.put(map_id)
-        print(f"[transport] flushed {len(batch)} frame(s) as {map_id}")
+        log(f"flushed {len(batch)} frame(s) as {map_id}" + ("; holding new frames for its NFN round" if self.holding else ""))
         return map_id
 
     # ========================================================================= stats

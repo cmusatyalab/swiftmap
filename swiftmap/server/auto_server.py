@@ -77,6 +77,7 @@ class AutoMappingServer:
         # run state
         self.is_running = False
         self.processing = False        # the worker is mid-pipeline on a batch
+        self.completed = 0             # batches mapped with their NFN rounds done
         self.keyframe_filter = False
         self.nfn_mode = True
         self.nfn_rounds = constants.NFN_ROUNDS
@@ -163,6 +164,7 @@ class AutoMappingServer:
                     planned = self._map(map_id, plan=done < rounds)
                 if self.db.grow_site(map_id):
                     self.db.get_site().write2disk()
+                self.completed += 1
             finally:
                 self.transporter.release()
                 self.processing = False
@@ -261,6 +263,7 @@ class AutoMappingServer:
         status = (self.transporter.batch_status() if self.transporter else
                   {"collected": 0, "capacity": self.cfg.batch_size, "latest": None})
         status["processing"] = self.processing
+        status["completed"] = self.completed
         status["keyframe_filter"] = self.keyframe_filter
         status["log"] = self.recent_log()
         return status
